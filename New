@@ -1,5 +1,5 @@
 
-import os import time import requests from bs4 import BeautifulSoup
+import os import time import requests from bs4 import BeautifulSoup import re
 
 CHAPTER_TEXT = """<?xml version="1.0"?>
 
@@ -26,7 +26,12 @@ print(f"Found {len(title_urls)} titles. Processing...")
 
 Loop through each title
 
-for title_name, title_url in title_urls: print(f"\n📖 Fetching {title_name} from {title_url}...") safe_title_name = title_name.replace(':', ' -').replace('/', '-').strip() title_directory = os.path.join(master_directory, safe_title_name) os.makedirs(title_directory, exist_ok=True)
+for title_name, title_url in title_urls: print(f"\n📖 Fetching {title_name} from {title_url}...")
+
+# Create title directory
+safe_title_name = title_name.replace(':', ' -').replace('/', '-').strip()
+title_directory = os.path.join(master_directory, safe_title_name)
+os.makedirs(title_directory, exist_ok=True)
 
 # Fetch title page
 try:
@@ -38,16 +43,19 @@ except requests.exceptions.RequestException as e:
 
 title_soup = BeautifulSoup(title_response.text, 'html.parser')
 
-# Find all chapter links
+# Find all chapter links under this title
 chapter_links = title_soup.find_all('a', href=True)
 chapter_urls = [(a.text.strip(), base_url + "NHTOC/" + a['href']) for a in chapter_links if 'NHTOC-' in a['href']]
 
 print(f"📂 Found {len(chapter_urls)} chapters in {title_name}. Processing...")
 
+# Loop through each chapter
 for chapter_name, chapter_url in chapter_urls:
     print(f"\n📄 Fetching {chapter_name} from {chapter_url}...")
-    time.sleep(1)
 
+    time.sleep(1)  # Prevent overloading the server
+
+    # Fetch chapter page
     try:
         chapter_response = requests.get(chapter_url, headers=headers, timeout=10)
         chapter_response.raise_for_status()
@@ -56,66 +64,73 @@ for chapter_name, chapter_url in chapter_urls:
         continue
 
     chapter_soup = BeautifulSoup(chapter_response.text, 'html.parser')
-    body_tag = chapter_soup.find('body')
-    if not body_tag:
-        print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
+
+    # Find section link inside <h2>
+    section_link_tag = chapter_soup.find('body').find('h2').find('a', href=True) if chapter_soup.find('body') else None
+    if not section_link_tag:
+        print(f"⚠️ Skipping {chapter_name} - No valid section link found.")
         continue
 
-    # Extract section links
-    section_links = [base_url + a["href"].replace("../", "") for a in body_tag.find_all('a', href=True) if "../" in a["href"]]
-    if not section_links:
-        print(f"⚠️ No valid section links found. Checking for direct content...")
-        direct_content = chapter_soup.find_all('p')
-        chapter_content = CHAPTER_TEXT + f'\n<p class="c1">{title_name}</p>'
-        chapter_content += f'\n<p class="c1">{chapter_name}</p>'
-        for para in direct_content:
-            chapter_content += f'\n<p>{para.get_text(strip=True)}</p>'
-        chapter_content += "\n</div>\n</body>"
-        xml_filename = os.path.join(title_directory, f'{chapter_name}.xml')
-        with open(xml_filename, 'w', encoding='utf-8') as f:
-            f.write(chapter_content)
-        print(f"✅ Saved direct content for {chapter_name} in {xml_filename}")
+    section_url = base_url + section_link_tag['href'].replace('../', '')
+    print(f"🔗 Extracted section link: {section_url}")
+
+    # Fetch sections page
+    try:
+        section_response = requests.get(section_url, headers=headers, timeout=10)
+        section_response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Skipping {chapter_name} - Failed to fetch section page: {e}")
         continue
 
-    chapter_content = CHAPTER_TEXT + f'\n<p class="c1">{title_name}</p>'
+    section_soup = BeautifulSoup(section_response.text, 'html.parser')
+
+    # Extract Chapter Name from metadata
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+    safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
+
+    # Create file content
+    chapter_content = CHAPTER_TEXT
+    chapter_content += f'\n<p class="c1">{title_name}</p>'
     chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
-    for section_url in section_links:
-        print(f"🔗 Extracting from section: {section_url}")
-        try:
-            section_response = requests.get(section_url, headers=headers, timeout=10)
-            section_response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ Skipping section - Failed to fetch section page: {e}")
-            continue
+    # Find all sections
+    sections = section_soup.find_all('center')
 
-        section_soup = BeautifulSoup(section_response.text, 'html.parser')
-        for section in section_soup.find_all('center'):
-            bold_tag = section.find_next('b')
-            if bold_tag:
-                section_title = bold_tag.get_text(strip=True)
-                chapter_content += f'\n<h1 class="c2">{section_title}</h1>'
-                
-                section_content = section.find_next('codesect')
-                section_content_text = section_content.get_text("\n", strip=True) if section_content else ""
-                
-                repealed_tag = section.find_next('sourcenote')
-                repealed_text = repealed_tag.get_text("\n", strip=True) if repealed_tag else ""
-                
-                if not section_content_text.strip() and not repealed_text.strip():
-                    chapter_content += f'\n<h2>No additional content available.</h2>'
-                else:
-                    if section_content_text.strip():
-                        chapter_content += f'\n<h2>{section_content_text}</h2>'
-                    if repealed_text.strip():
-                        chapter_content += f'\n<p class="gc.nh.gov">{repealed_text}</p>'
+    section_count = 0
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+            
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n", strip=True) if section_content else "No content available"
+            
+            # Ensure correct formatting
+            formatted_content = "\n".join(re.split(r'(?<=\))\s+', section_content_text))
+            
+            chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
+            chapter_content += f'\n<h2>{formatted_content}</h2>'
+            
+            # Extract history
+            source_note = section.find_next('sourcenote')
+            if source_note:
+                history_text = source_note.get_text(strip=True)
+                chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+            
+            section_count += 1
 
     chapter_content += "\n</div>\n</body>"
-    xml_filename = os.path.join(title_directory, f'{chapter_name}.xml')
-    with open(xml_filename, 'w', encoding='utf-8') as f:
-        f.write(chapter_content)
 
-    print(f"✅ Saved sections in {xml_filename}")
+    if section_count > 0:
+        # Save XML file
+        xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
+        with open(xml_filename, 'w', encoding='utf-8') as f:
+            f.write(chapter_content)
+        print(f"✅ Saved {section_count} sections in {xml_filename}")
+    else:
+        print(f"⚠️ No sections found for {chapter_name}. Skipping.")
 
 print("\n✅ All titles and chapters processed successfully!")
 
