@@ -1,5 +1,7 @@
 
 
+
+
 import os
 import time
 import requests
@@ -77,39 +79,8 @@ for title_name, title_url in title_urls:
 
         chapter_soup = BeautifulSoup(chapter_response.text, 'html.parser')
 
-        # Ensure body exists
-        body_tag = chapter_soup.find('body')
-        if not body_tag:
-            print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
-            continue
-
-        # Find section link inside <h2>
-        section_link_tag = None
-        for h2_tag in body_tag.find_all('h2'):
-            a_tag = h2_tag.find('a', href=True)
-            if a_tag and "../" in a_tag["href"]:
-                section_link_tag = a_tag
-                break
-
-        if not section_link_tag:
-            print(f"⚠️ Skipping {chapter_name} - No valid section link found.")
-            continue
-
-        section_url = base_url + section_link_tag['href'].replace('../', '')
-        print(f"🔗 Extracted section link: {section_url}")
-
-        # Fetch sections page
-        try:
-            section_response = requests.get(section_url, headers=headers, timeout=10)
-            section_response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ Skipping {chapter_name} - Failed to fetch section page: {e}")
-            continue
-
-        section_soup = BeautifulSoup(section_response.text, 'html.parser')
-
         # Extract Chapter Name from metadata
-        meta_tag = section_soup.find('meta', {'name': 'chapter'})
+        meta_tag = chapter_soup.find('meta', {'name': 'chapter'})
         if meta_tag:
             chapter_name = meta_tag['content'].strip()
         safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
@@ -119,9 +90,18 @@ for title_name, title_url in title_urls:
         chapter_content += f'\n<p class="c1">{title_name}</p>'
         chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
-        # Find all sections
-        sections = section_soup.find_all('center')
+        # Ensure body exists
+        body_tag = chapter_soup.find('body')
+        if not body_tag:
+            print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
+            continue
 
+        # Extract all relevant text from body
+        body_text = body_tag.get_text("\n").strip()
+        clean_body_text = "\n".join([f"<p>{line.strip()}</p>" for line in body_text.split("\n") if line.strip()])
+
+        # Extract sections if they exist
+        sections = chapter_soup.find_all('center')
         seen_sections = set()  # Prevent duplicate sections
         section_count = 0
 
@@ -136,12 +116,21 @@ for title_name, title_url in title_urls:
 
                 # Extract section content
                 section_content = section.find_next('codesect')
-                section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+                section_content_text = section_content.get_text("\n").strip() if section_content else ""
 
-                # Split content into separate lines for pointers like (a), (b), (1), (2)
-                formatted_content = "\n".join([f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>" for line in section_content_text.split("\n")])
+                # If content is empty, check for repealed information
+                if not section_content_text:
+                    repealed_note = section.find_next('sourcenote')
+                    if repealed_note:
+                        section_content_text = repealed_note.get_text(strip=True)
 
-                # Format as requested
+                # Format pointers properly
+                formatted_content = "\n".join(
+                    [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>"
+                     for line in section_content_text.split("\n")]
+                )
+
+                # Format section in XML
                 chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
                 chapter_content += formatted_content
 
@@ -152,6 +141,11 @@ for title_name, title_url in title_urls:
                     chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
 
                 section_count += 1
+
+        # Handle chapters that have no sections but contain content
+        if section_count == 0 and clean_body_text:
+            chapter_content += clean_body_text
+            section_count = 1  # Mark it as processed
 
         chapter_content += "\n</div>\n</body>"
 
