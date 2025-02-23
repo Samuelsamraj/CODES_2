@@ -2,7 +2,6 @@
 
 
 
-
 import os
 import time
 import requests
@@ -86,77 +85,94 @@ for title_name, title_url in title_urls:
             print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
             continue
 
-        # Extract Chapter Name from metadata
-        meta_tag = chapter_soup.find('meta', {'name': 'chapter'})
-        if meta_tag:
-            chapter_name = meta_tag['content'].strip()
-        safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
+        # Find section link inside <h2>
+        section_link_tag = None
+        for h2_tag in body_tag.find_all('h2'):
+            a_tag = h2_tag.find('a', href=True)
+            if a_tag and "../" in a_tag["href"]:
+                section_link_tag = a_tag
+                break
 
-        # Create file content
+        section_count = 0  # Track the number of sections processed
         chapter_content = CHAPTER_TEXT
         chapter_content += f'\n<p class="c1">{title_name}</p>'
         chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
-        # Find sections
-        sections = chapter_soup.find_all('center')
-        seen_sections = set()  # Prevent duplicate sections
-        section_count = 0
+        # **CASE 1: If Sections Exist (Regular Case)**
+        if section_link_tag:
+            section_url = base_url + section_link_tag['href'].replace('../', '')
+            print(f"🔗 Extracted section link: {section_url}")
 
-        for section in sections:
-            section_title_tag = section.find_next('b')
-            if section_title_tag:
-                section_text = section_title_tag.get_text(strip=True)
+            try:
+                section_response = requests.get(section_url, headers=headers, timeout=10)
+                section_response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ Skipping {chapter_name} - Failed to fetch section page: {e}")
+                continue
 
-                if section_text in seen_sections:
-                    continue  # Skip duplicate sections
-                seen_sections.add(section_text)
+            section_soup = BeautifulSoup(section_response.text, 'html.parser')
 
-                # Extract section content
-                section_content = section.find_next('codesect')
-                section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+            # Extract Chapter Name from metadata
+            meta_tag = section_soup.find('meta', {'name': 'chapter'})
+            if meta_tag:
+                chapter_name = meta_tag['content'].strip()
 
-                # **Fixing empty <p> tags & formatting pointers properly**
-                formatted_content = "\n".join(
-                    [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>" for line in section_content_text.split("\n") if line.strip()]
-                )
+            sections = section_soup.find_all('center')
+            seen_sections = set()  # Prevent duplicate sections
 
-                # Format as requested
-                chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
-                chapter_content += formatted_content
+            for section in sections:
+                section_title_tag = section.find_next('b')
+                if section_title_tag:
+                    section_text = section_title_tag.get_text(strip=True)
+                    if section_text in seen_sections:
+                        continue  # Avoid duplicate sections
+                    seen_sections.add(section_text)
 
-                # Extract history if available
-                source_note = section.find_next('sourcenote')
-                if source_note:
-                    history_text = source_note.get_text(" ", strip=True)
-                    chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+                    section_content = section.find_next('codesect')
+                    section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+
+                    # Split content into separate lines for pointers like (a), (b), (1), (2)
+                    formatted_content = "\n".join(
+                        [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>"
+                         for line in section_content_text.split("\n") if line.strip()]
+                    )
+
+                    chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
+                    chapter_content += formatted_content
+
+                    # Extract history if available
+                    source_note = section.find_next('sourcenote')
+                    if source_note:
+                        history_text = source_note.get_text(" ", strip=True)
+                        chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+
+                    section_count += 1
+
+        # **CASE 2: If No Sections Exist but Content is Present**
+        else:
+            chapter_text_content = body_tag.get_text("\n", strip=True)  # Extract all text
+            chapter_text_lines = [line.strip() for line in chapter_text_content.split("\n") if line.strip()]  # Remove empty lines
+
+            if chapter_text_lines:
+                # Extract title & history separately
+                chapter_title = chapter_text_lines[0]  # Usually first line is chapter name
+                chapter_history = chapter_text_lines[-1]  # Last line is usually history
+
+                chapter_content += f'\n<h1 class="c2">{chapter_title}</h1>'
+                chapter_content += f'\n<h2>{" ".join(chapter_text_lines[1:-1])}</h2>'  # Everything in between
+                chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {chapter_history}</p>'
 
                 section_count += 1
 
-        # **Handling Chapters with No Sections but Containing Text**
-        if section_count == 0:
-            chapter_text = chapter_soup.find('body').get_text("\n", strip=True)
-
-            if chapter_text:
-                chapter_content += f'\n<h1 class="c2">{chapter_name} -</h1>'
-                chapter_content += f'\n<p>{chapter_text}</p>'
-
-                # Extract history if available
-                source_note = chapter_soup.find('sourcenote')
-                if source_note:
-                    history_text = source_note.get_text(" ", strip=True)
-                    chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
-            
-            else:
-                chapter_content += f'\n<h1 class="c2">{chapter_name} -</h1>'
-                chapter_content += '\n<h2>No content available</h2>'
-
         chapter_content += "\n</div>\n</body>"
 
-        # Save XML file
-        xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
-        with open(xml_filename, 'w', encoding='utf-8') as f:
-            f.write(chapter_content)
+        if section_count > 0:
+            xml_filename = os.path.join(title_directory, f'{safe_title_name}.xml')
+            with open(xml_filename, 'w', encoding='utf-8') as f:
+                f.write(chapter_content)
 
-        print(f"✅ Saved {section_count} sections in {xml_filename}")
+            print(f"✅ Saved {section_count} sections in {xml_filename}")
+        else:
+            print(f"⚠️ No content found for {chapter_name}. Skipping.")
 
 print("\n✅ All titles and chapters processed successfully!")
