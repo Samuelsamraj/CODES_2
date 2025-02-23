@@ -102,14 +102,22 @@ for chapter_name, chapter_url in chapter_urls:
         if bold_tag:
             section_title = bold_tag.get_text(strip=True)
             chapter_content += f'\n<h1 class="c2">{section_title}</h1>'
-
+            
             section_content = section.find_next('codesect')
             section_content_text = section_content.get_text("\n", strip=True) if section_content else ""
-            if not section_content_text.strip():
+            
+            # Include repealed content
+            repealed_tag = section.find_next('sourcenote')
+            repealed_text = repealed_tag.get_text("\n", strip=True) if repealed_tag else ""
+            
+            if not section_content_text.strip() and not repealed_text.strip():
                 chapter_content += f'\n<h2>No additional content available.</h2>'
             else:
-                chapter_content += f'\n<h2>{section_content_text}</h2>'
-
+                if section_content_text.strip():
+                    chapter_content += f'\n<h2>{section_content_text}</h2>'
+                if repealed_text.strip():
+                    chapter_content += f'\n<p class="gc.nh.gov">{repealed_text}</p>'
+            
             section_count += 1
 
     chapter_content += "\n</div>\n</body>"
