@@ -1,6 +1,8 @@
 
 
 
+
+
 import os
 import time
 import requests
@@ -78,6 +80,12 @@ for title_name, title_url in title_urls:
 
         chapter_soup = BeautifulSoup(chapter_response.text, 'html.parser')
 
+        # Ensure body exists
+        body_tag = chapter_soup.find('body')
+        if not body_tag:
+            print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
+            continue
+
         # Extract Chapter Name from metadata
         meta_tag = chapter_soup.find('meta', {'name': 'chapter'})
         if meta_tag:
@@ -89,20 +97,10 @@ for title_name, title_url in title_urls:
         chapter_content += f'\n<p class="c1">{title_name}</p>'
         chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
-        # Ensure body exists
-        body_tag = chapter_soup.find('body')
-        if not body_tag:
-            print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
-            continue
-
-        # Extract all text from body if no explicit sections are found
-        all_body_text = body_tag.get_text("\n").strip()
-        cleaned_body_text = "\n".join([f"<p>{line.strip()}</p>" for line in all_body_text.split("\n") if line.strip()])
-
-        # Extract sections
+        # Find sections
         sections = chapter_soup.find_all('center')
+        seen_sections = set()  # Prevent duplicate sections
         section_count = 0
-        seen_sections = set()
 
         for section in sections:
             section_title_tag = section.find_next('b')
@@ -110,26 +108,19 @@ for title_name, title_url in title_urls:
                 section_text = section_title_tag.get_text(strip=True)
 
                 if section_text in seen_sections:
-                    continue  # Avoid duplicate sections
+                    continue  # Skip duplicate sections
                 seen_sections.add(section_text)
 
                 # Extract section content
-                section_content_tag = section.find_next('codesect')
-                section_content_text = section_content_tag.get_text("\n").strip() if section_content_tag else ""
+                section_content = section.find_next('codesect')
+                section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
 
-                # Check for repealed sections and extract that text
-                if not section_content_text:
-                    repealed_note = section.find_next('sourcenote')
-                    if repealed_note:
-                        section_content_text = repealed_note.get_text(strip=True)
-
-                # Format pointers properly
+                # **Fixing empty <p> tags & formatting pointers properly**
                 formatted_content = "\n".join(
-                    [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>"
-                     for line in section_content_text.split("\n")]
+                    [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>" for line in section_content_text.split("\n") if line.strip()]
                 )
 
-                # Format section in XML
+                # Format as requested
                 chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
                 chapter_content += formatted_content
 
@@ -141,21 +132,31 @@ for title_name, title_url in title_urls:
 
                 section_count += 1
 
-        # If no sections were found but the chapter has text, include that instead
-        if section_count == 0 and cleaned_body_text:
-            chapter_content += cleaned_body_text
-            section_count = 1
+        # **Handling Chapters with No Sections but Containing Text**
+        if section_count == 0:
+            chapter_text = chapter_soup.find('body').get_text("\n", strip=True)
+
+            if chapter_text:
+                chapter_content += f'\n<h1 class="c2">{chapter_name} -</h1>'
+                chapter_content += f'\n<p>{chapter_text}</p>'
+
+                # Extract history if available
+                source_note = chapter_soup.find('sourcenote')
+                if source_note:
+                    history_text = source_note.get_text(" ", strip=True)
+                    chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+            
+            else:
+                chapter_content += f'\n<h1 class="c2">{chapter_name} -</h1>'
+                chapter_content += '\n<h2>No content available</h2>'
 
         chapter_content += "\n</div>\n</body>"
 
-        if section_count > 0:
-            # Save XML file
-            xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
-            with open(xml_filename, 'w', encoding='utf-8') as f:
-                f.write(chapter_content)
+        # Save XML file
+        xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
+        with open(xml_filename, 'w', encoding='utf-8') as f:
+            f.write(chapter_content)
 
-            print(f"✅ Saved {section_count} sections in {xml_filename}")
-        else:
-            print(f"⚠️ No sections found for {chapter_name}. Skipping.")
+        print(f"✅ Saved {section_count} sections in {xml_filename}")
 
 print("\n✅ All titles and chapters processed successfully!")
