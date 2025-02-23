@@ -93,10 +93,11 @@ for title_name, title_url in title_urls:
                 section_link_tag = a_tag
                 break
 
-        section_count = 0  # Track the number of sections processed
         chapter_content = CHAPTER_TEXT
         chapter_content += f'\n<p class="c1">{title_name}</p>'
         chapter_content += f'\n<p class="c1">{chapter_name}</p>'
+
+        section_count = 0  # Track the number of sections processed
 
         # **CASE 1: If Sections Exist (Regular Case)**
         if section_link_tag:
@@ -118,20 +119,21 @@ for title_name, title_url in title_urls:
                 chapter_name = meta_tag['content'].strip()
 
             sections = section_soup.find_all('center')
-            seen_sections = set()  # Prevent duplicate sections
+            seen_sections = set()
 
             for section in sections:
                 section_title_tag = section.find_next('b')
                 if section_title_tag:
                     section_text = section_title_tag.get_text(strip=True)
+
                     if section_text in seen_sections:
-                        continue  # Avoid duplicate sections
+                        continue  # Skip duplicate sections
                     seen_sections.add(section_text)
 
+                    # Extract section content
                     section_content = section.find_next('codesect')
                     section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
 
-                    # Split content into separate lines for pointers like (a), (b), (1), (2)
                     formatted_content = "\n".join(
                         [f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>"
                          for line in section_content_text.split("\n") if line.strip()]
@@ -150,16 +152,15 @@ for title_name, title_url in title_urls:
 
         # **CASE 2: If No Sections Exist but Content is Present**
         else:
-            chapter_text_content = body_tag.get_text("\n", strip=True)  # Extract all text
-            chapter_text_lines = [line.strip() for line in chapter_text_content.split("\n") if line.strip()]  # Remove empty lines
+            chapter_text_content = body_tag.get_text("\n", strip=True)
+            chapter_text_lines = [line.strip() for line in chapter_text_content.split("\n") if line.strip()]
 
             if chapter_text_lines:
-                # Extract title & history separately
-                chapter_title = chapter_text_lines[0]  # Usually first line is chapter name
-                chapter_history = chapter_text_lines[-1]  # Last line is usually history
+                chapter_title = chapter_text_lines[0]
+                chapter_history = chapter_text_lines[-1]
 
                 chapter_content += f'\n<h1 class="c2">{chapter_title}</h1>'
-                chapter_content += f'\n<h2>{" ".join(chapter_text_lines[1:-1])}</h2>'  # Everything in between
+                chapter_content += f'\n<h2>{" ".join(chapter_text_lines[1:-1])}</h2>'
                 chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {chapter_history}</p>'
 
                 section_count += 1
