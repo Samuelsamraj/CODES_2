@@ -1,16 +1,15 @@
 
 
+
 import os
 import time
 import requests
 from bs4 import BeautifulSoup
 import re
 
-CHAPTER_TEXT = """<?xml version="1.0"?>
-
-<body>  
-<div class="WordSection1">"""
-
+CHAPTER_TEXT = """
+    
+""" 
 # Base URLs
 main_url = "https://gc.nh.gov/rsa/html/nhtoc.htm"
 base_url = "https://gc.nh.gov/rsa/html/"
@@ -57,7 +56,7 @@ for title_name, title_url in title_urls:
 
     # Find all chapter links under this title
     chapter_links = title_soup.find_all('a', href=True)
-    chapter_urls = list(set([(a.text.strip(), base_url + "NHTOC/" + a['href']) for a in chapter_links if 'NHTOC-' in a['href']]))
+    chapter_urls = [(a.text.strip(), base_url + "NHTOC/" + a['href']) for a in chapter_links if 'NHTOC-' in a['href']]
 
     print(f"📂 Found {len(chapter_urls)} chapters in {title_name}. Processing...")
 
@@ -77,20 +76,8 @@ for title_name, title_url in title_urls:
 
         chapter_soup = BeautifulSoup(chapter_response.text, 'html.parser')
 
-        # Ensure body exists
-        body_tag = chapter_soup.find('body')
-        if not body_tag:
-            print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
-            continue
-
         # Find section link inside <h2>
-        section_link_tag = None
-        for h2_tag in body_tag.find_all('h2'):
-            a_tag = h2_tag.find('a', href=True)
-            if a_tag and "../" in a_tag["href"]:
-                section_link_tag = a_tag
-                break
-
+        section_link_tag = chapter_soup.find('body').find('h2').find('a', href=True) if chapter_soup.find('body') else None
         if not section_link_tag:
             print(f"⚠️ Skipping {chapter_name} - No valid section link found.")
             continue
@@ -115,7 +102,7 @@ for title_name, title_url in title_urls:
         safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
 
         # Create file content
-        chapter_content = CHAPTER_TEXT  # Start XML file with the defined structure
+        chapter_content = CHAPTER_TEXT
         chapter_content += f'\n<p class="c1">{title_name}</p>'
         chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
@@ -123,33 +110,34 @@ for title_name, title_url in title_urls:
         sections = section_soup.find_all('center')
 
         section_count = 0
-        seen_sections = set()  # Avoid duplicates
+        seen_sections = set()  # Avoid duplicate sections
 
-        for section in sections:
-            section_title = section.find('b')
-            if section_title:
-                section_text = section_title.get_text(strip=True)
+        for idx, section in enumerate(sections):
+            section_title_tag = section.find_next('b')
+            if section_title_tag:
+                section_text = section_title_tag.get_text(strip=True)
+
+                # Avoid duplicate sections (fix for first section repeating)
                 if section_text in seen_sections:
-                    continue  # Avoid duplicate sections
+                    continue
                 seen_sections.add(section_text)
 
-                # Extract content
                 section_content = section.find_next('codesect')
                 section_content_text = section_content.get_text("\n", strip=True) if section_content else "No content available"
 
-                # Split content into separate lines for pointers like (a), (b), (1), (2)
+                # Properly format and separate pointers like (a), (b), (1), (2)
                 formatted_content = ""
-                for line in re.split(r'(\w|\d+\.)', section_content_text):
-                    if re.match(r'^\w|\d+\.$', line.strip()):  # If it's a pointer (a), (b), (1), (2)
-                        formatted_content += f'\n<h2>{line.strip()}</h2>'
+                lines = re.split(r'([a-zA-Z]|\d+\.)', section_content_text)
+                for i in range(len(lines)):
+                    if re.match(r'^[a-zA-Z]|^\d+\.$', lines[i].strip()):
+                        formatted_content += f'\n<h2>{lines[i].strip()}</h2>'
                     else:
-                        formatted_content += f'\n<h3>{line.strip()}</h3>'
+                        formatted_content += f'\n<h3>{lines[i].strip()}</h3>'
 
-                # Format as requested
                 chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
                 chapter_content += formatted_content
 
-                # Extract history if available
+                # Extract history
                 source_note = section.find_next('sourcenote')
                 if source_note:
                     history_text = source_note.get_text(strip=True)
@@ -164,7 +152,6 @@ for title_name, title_url in title_urls:
             xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
             with open(xml_filename, 'w', encoding='utf-8') as f:
                 f.write(chapter_content)
-
             print(f"✅ Saved {section_count} sections in {xml_filename}")
         else:
             print(f"⚠️ No sections found for {chapter_name}. Skipping.")
