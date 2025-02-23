@@ -1,7 +1,6 @@
 
 
 
-
 import os
 import time
 import requests
@@ -96,14 +95,14 @@ for title_name, title_url in title_urls:
             print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
             continue
 
-        # Extract all relevant text from body
-        body_text = body_tag.get_text("\n").strip()
-        clean_body_text = "\n".join([f"<p>{line.strip()}</p>" for line in body_text.split("\n") if line.strip()])
+        # Extract all text from body if no explicit sections are found
+        all_body_text = body_tag.get_text("\n").strip()
+        cleaned_body_text = "\n".join([f"<p>{line.strip()}</p>" for line in all_body_text.split("\n") if line.strip()])
 
-        # Extract sections if they exist
+        # Extract sections
         sections = chapter_soup.find_all('center')
-        seen_sections = set()  # Prevent duplicate sections
         section_count = 0
+        seen_sections = set()
 
         for section in sections:
             section_title_tag = section.find_next('b')
@@ -111,14 +110,14 @@ for title_name, title_url in title_urls:
                 section_text = section_title_tag.get_text(strip=True)
 
                 if section_text in seen_sections:
-                    continue  # Skip duplicate sections
+                    continue  # Avoid duplicate sections
                 seen_sections.add(section_text)
 
                 # Extract section content
-                section_content = section.find_next('codesect')
-                section_content_text = section_content.get_text("\n").strip() if section_content else ""
+                section_content_tag = section.find_next('codesect')
+                section_content_text = section_content_tag.get_text("\n").strip() if section_content_tag else ""
 
-                # If content is empty, check for repealed information
+                # Check for repealed sections and extract that text
                 if not section_content_text:
                     repealed_note = section.find_next('sourcenote')
                     if repealed_note:
@@ -142,10 +141,10 @@ for title_name, title_url in title_urls:
 
                 section_count += 1
 
-        # Handle chapters that have no sections but contain content
-        if section_count == 0 and clean_body_text:
-            chapter_content += clean_body_text
-            section_count = 1  # Mark it as processed
+        # If no sections were found but the chapter has text, include that instead
+        if section_count == 0 and cleaned_body_text:
+            chapter_content += cleaned_body_text
+            section_count = 1
 
         chapter_content += "\n</div>\n</body>"
 
