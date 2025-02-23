@@ -61,15 +61,13 @@ for chapter_name, chapter_url in chapter_urls:
         print(f"⚠️ Skipping {chapter_name} - No <body> tag found.")
         continue
 
-    # Find first section link in <h2>
-    section_link_tag = None
+    section_url = None
     for h2_tag in body_tag.find_all('h2'):
         a_tag = h2_tag.find('a', href=True)
         if a_tag and "../" in a_tag["href"]:
-            section_link_tag = a_tag
+            section_url = base_url + a_tag["href"].replace('../', '')
             break
 
-    section_url = base_url + section_link_tag['href'].replace('../', '') if section_link_tag else None
     print(f"🔗 Extracted section link: {section_url}")
 
     if not section_url:
@@ -94,46 +92,29 @@ for chapter_name, chapter_url in chapter_urls:
         continue
 
     section_soup = BeautifulSoup(section_response.text, 'html.parser')
-    meta_tag = section_soup.find('meta', {'name': 'chapter'})
-    if meta_tag:
-        chapter_name = meta_tag['content'].strip()
-    safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
-
     chapter_content = CHAPTER_TEXT + f'\n<p class="c1">{title_name}</p>'
     chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
     sections = section_soup.find_all('center')
     section_count = 0
     for section in sections:
-        section_title = section.find('h3')
-        if section_title:
-            section_text = section_title.get_text(strip=True)
-            chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
+        bold_tag = section.find_next('b')
+        if bold_tag:
+            section_title = bold_tag.get_text(strip=True)
+            chapter_content += f'\n<h1 class="c2">{section_title}</h1>'
 
             section_content = section.find_next('codesect')
-            section_content_text = section_content.get_text(strip=True) if section_content else ""
-
+            section_content_text = section_content.get_text("\n", strip=True) if section_content else ""
             if not section_content_text.strip():
                 chapter_content += f'\n<h2>No additional content available.</h2>'
             else:
-                formatted_content = ""
-                for line in re.split(r'([a-z0-9]+)', section_content_text):
-                    if re.match(r'^[a-z0-9]+$', line.strip()):
-                        formatted_content += f'\n<h2>{line.strip()}</h2>'
-                    else:
-                        formatted_content += f'\n<h3>{line.strip()}</h3>'
-                chapter_content += formatted_content
-
-            source_note = section.find_next('sourcenote')
-            if source_note:
-                history_text = source_note.get_text(strip=True)
-                chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+                chapter_content += f'\n<h2>{section_content_text}</h2>'
 
             section_count += 1
 
     chapter_content += "\n</div>\n</body>"
 
-    xml_filename = os.path.join(title_directory, f'{safe_chapter_name}.xml')
+    xml_filename = os.path.join(title_directory, f'{chapter_name}.xml')
     with open(xml_filename, 'w', encoding='utf-8') as f:
         f.write(chapter_content)
 
