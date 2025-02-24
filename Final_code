@@ -207,3 +207,177 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
+
+
+
+
+async def download_NH_input(url, base_url, title, download, collection_path):
+    """Download and process NH legal statutes by title"""
+    
+    collection_path = os.path.join(collection_path, f"Title_{title}")
+    if not os.path.exists(collection_path):
+        os.makedirs(collection_path)
+
+    toc_list = await get_title_dict(url, collection_path)
+
+    if title:
+        title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url)
+        title_url = title_url + title + ".htm"
+
+        ack = await fetch_title(title_url, title, toc_list, collection_path)
+
+        with connect_to_mongodb() as client:
+            logger.info(f"Connected to {config['docdb']} database")
+            db = client[config['docdb']]
+            collection = db[config['collection_name']]
+
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:
+                task_id = book["taskId"]
+                query = {"taskId": task_id}
+                file_details = []
+
+                for file in ack.keys():
+                    details = {
+                        "Name": f"{title}_{file}.xml",
+                        "collection": "true",
+                        "common_conversion": "",
+                        "mncr_conversion": "",
+                        "meta": "",
+                        "toc": "",
+                        "type": config['NH_seclevel'],
+                        "titleName": ack[file],
+                        "normCite": ""
+                    }
+                    file_details.append(details)
+
+                con_values = {"$set": {"fileDetail": file_details}}
+                collection.update_one(query, con_values)
+
+                total_file = len(ack)
+                total = {"$set": {"totalFiles": total_file, "finalStage": "Conversion"}}
+                collection.update_one(query, total)
+
+                logger.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+            client.close()
+            logger.info(f"Title {title} Conversion in progress")
+
+            conv_url = config_yml['convert_request']
+            payload = json.dumps({
+                "data": {
+                    "createdBy": "",
+                    "createdDate": datetime.now().strftime("%Y-%m-%d"),
+                    "firstleveno": f"{title}",
+                    "jx": "NH",
+                    "firstLeveltitle": ""
+                },
+                "additionalParam": {
+                    "convRawXm1": "yes",
+                    "convMncrXm1": "string"
+                }
+            }, indent=4)
+
+            headers = {'Content-Type': 'application/json'}
+            logger.info(f"Payload {payload}")
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(conv_url, headers=headers, data=payload) as response:
+                        request_resp = await response.text()
+                        logger.info(f"Conversion request sent for {title}")
+            except Exception as e:
+                logger.error(f"Conversion request failed for {title} {e}")
+
+        return ack
+    else:
+        for title_num, div_value in toc_list.items():
+            title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url)
+            title_url = title_url + title_num + ".htm"
+            message = await fetch_title(title_url, title_num, toc_list, collection_path)
+
+        return message
+
+
+
+
+
+
+async def validate_NH_input(url, base_url, download, collection_path):
+    """Validate NH legal statutes before processing"""
+
+    with connect_to_mongodb() as client:
+        logger.info(f"Connected to {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+        done = []
+        wip = []
+
+        for tn in download.download:
+            title = tn.firstLeveno
+            doc_title = tn.firstLeveltitle
+
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:
+                downloaded_titles = {
+                    "title": title,
+                    "downloadDate": book["downloadDate"]
+                }
+                done.append(downloaded_titles)
+            else:
+                wip_titles = {
+                    "Num": title,
+                    "Title": doc_title,
+                    "jX": download.jx,
+                    "createdBy": download.createdBy,
+                    "createdDate": download.createdDate
+                }
+                wip.append(wip_titles)
+
+        for download in wip:
+            title = download['Num']
+            asyncio.create_task(download_NH_input(url, base_url, title, download, collection_path))
+
+        query = {"taskId": {"$regex": "^NH"}}
+        task_count = collection.count_documents(query) + 1
+        tcount = task_count
+        task_id = ""
+
+        for tas in range(0, task_count):
+            task_id = 'NH' + str(tcount)
+            if (book := collection.find_one({"jx": 'NH', "taskId": task_id})) is not None:
+                tcount += 1
+            else:
+                break
+
+        current_date = datetime.now().date()
+        formatted_date = current_date.strftime("%Y-%m-%d")
+        create_date = download['createdDate']
+
+        if isinstance(create_date, date):
+            create_date = create_date.isoformat()
+
+        file_details = []
+        title_details = {
+            "jx": download['jX'],
+            "createdBy": download['createdBy'],
+            "createdDate": create_date,
+            "titleNo": title,
+            "titleName": download['Title'],
+            "downloadDate": formatted_date,
+            "totalFiles": 0,
+            "fileDetail": file_details,
+            "finalStage": "Collection",
+            "finalStatus": "In Progress",
+            "taskId": task_id,
+            "stateToc": "",
+            "Conversion": "",
+            "progress": ""
+        }
+        collection.insert_one(title_details)
+        logger.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+    return done, wip
