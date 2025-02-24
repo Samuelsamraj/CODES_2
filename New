@@ -96,16 +96,19 @@ for title_name, title_url in title_urls:
             print(f"⚠️ No valid section link found for {chapter_name}. Checking for standalone content...")
 
             # Extract standalone chapter content
-            standalone_content = body_tag.find_all('center')
+            standalone_content = body_tag.find_all(['h1', 'h2', 'p', 'b'])
             chapter_texts = [tag.get_text(" ", strip=True) for tag in standalone_content if tag.get_text(strip=True)]
-            
+
             if chapter_texts:
                 chapter_content = CHAPTER_TEXT
                 chapter_content += f'\n<p class="c1">{title_name}</p>'
                 chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
                 for text in chapter_texts:
-                    chapter_content += f'\n<h1 class="c2">{text}</h1>'
+                    if "Repealed" in text:
+                        chapter_content += f'\n<h1 class="c2">{text}</h1>'
+                    else:
+                        chapter_content += f'\n<p>{text}</p>'
 
                 chapter_content += "\n</div>\n</body>"
 
@@ -163,12 +166,9 @@ for title_name, title_url in title_urls:
                 section_content = section.find_next('codesect')
                 section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
 
-                # Split content into separate lines for pointers like (a), (b), (1), (2)
-                formatted_content = "\n".join([f"<h3>{line.strip()}</h3>" if re.match(r"^?[a-z0-9]+?\.", line.strip()) else f"<p>{line.strip()}</p>" for line in section_content_text.split("\n") if line.strip()])
-
-                # Format as requested
+                # Format content
                 chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
-                chapter_content += formatted_content
+                chapter_content += f'\n<p>{section_content_text}</p>'
 
                 # Extract history if available
                 source_note = section.find_next('sourcenote')
