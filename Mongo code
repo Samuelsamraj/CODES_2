@@ -273,3 +273,75 @@ async def download_NH_input(url, base_url, title, download, collection_path):
             title_url = title_url + title_num + ".htm"  
             message = await get_title(title_url, title_num, toc_list, collection_path)  
         return message
+
+
+
+async def validate_NH_input(url, base_url, download, collection_path):
+    with connect_to_mongodb() as client:
+        logger.info(f"Connected to {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+        done = []
+        wip = []
+
+        for tn in download.download:  
+            title = tn.firstLeveno  
+            doc_title = tn.firstLeveltitle  
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:  
+                downloaded_titles = {  
+                    "title": title,  
+                    "downloadDate": book["downloadDate"]  
+                }  
+                done.append(downloaded_titles)  
+            else:  
+                wip_titles = {  
+                    "Num": title,  
+                    "Title": doc_title,  
+                    "jX": download.jx,  
+                    "createdBy": download.createdBy,  
+                    "createdDate": download.createdDate  
+                }  
+                wip.append(wip_titles)  
+
+        for download in wip:  
+            title = download['Num']  
+            asyncio.create_task(download_NH_input(url, base_url, title, download, collection_path))  
+
+        query = {"taskId": {"$regex": "^NH"}}  
+        task_count = collection.count_documents(query) + 1  
+        tcount = task_count  
+        task_id = ""  
+
+        for tas in range(0, task_count):  
+            task_id = 'NH' + str(tcount)  
+            if (book := collection.find_one({"jx": 'NH', "taskId": task_id})) is not None:  
+                tcount += 1  
+            else:  
+                break  
+
+        current_date = datetime.now().date()  
+        formatted_date = current_date.strftime("%Y-%m-%d")  
+        create_date = download['createdDate']  
+        if isinstance(create_date, datetime):  
+            create_date = create_date.isoformat()  
+
+        file_details = []  
+        title_details = {  
+            "jx": download['jX'],  
+            "createdBy": download['createdBy'],  
+            "createdDate": create_date,  
+            "titleNo": title,  
+            "titleName": download['Title'],  
+            "downloadDate": formatted_date,  
+            "totalFiles": 0,  
+            "fileDetail": file_details,  
+            "finalStage": "Collection",  
+            "finalStatus": "In Progress",  
+            "taskId": task_id,  
+            "stateToc": "",  
+            "Conversion": "",  
+            "progress": ""  
+        }  
+        collection.insert_one(title_details)  
+        logger.info(f"Title {title} inserted into {config['collection_name']} collection")  
+    return done, wip
