@@ -1,0 +1,146 @@
+
+
+
+
+
+
+import os
+import time
+import aiohttp
+import asyncio
+import requests
+import re
+from bs4 import BeautifulSoup
+from lxml import etree
+
+# Base URLs
+main_url = "https://gc.nh.gov/rsa/html/nhtoc.htm"
+base_url = "https://gc.nh.gov/rsa/html/"
+
+# Create master directory
+master_directory = "New_Hampshire_RSA_Titles"
+os.makedirs(master_directory, exist_ok=True)
+
+# Headers for requests
+headers = {'User-Agent': 'Mozilla/5.0'}
+
+# XML Structure
+CHAPTER_TEXT = """<?xml version="1.0"?>
+
+<body>  
+<div class="WordSection1">"""
+
+# Function to fetch file content
+async def get_file(act_href):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(act_href, headers=headers, timeout=1180) as response:
+            try:
+                detail_html = await response.text()
+            except Exception as e:
+                print(f"⚠️ Failed to fetch content from {act_href}. Error: {e}")
+                return ""
+
+    soup = BeautifulSoup(detail_html, 'html.parser')
+    content = soup.find("div", {"id": "print"})
+    
+    if content:
+        for table in soup.find_all('table'):
+            table.decompose()  # Remove tables
+        return str(content)
+    return ""
+
+# Function to fetch and parse page content
+async def get_content(url, collection_path):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=180) as response:
+            try:
+                detail_html = await response.text()
+            except Exception as e:
+                print(f"⚠️ Failed to fetch {url}. Error: {e}")
+                return None
+    return BeautifulSoup(detail_html, 'html.parser')
+
+# Function to fetch and parse title details
+async def get_title_dict(url, collection_path):
+    page_content = await get_content(url, collection_path)
+    if not page_content:
+        return {}
+
+    toc = page_content.find("div", {"class": "ksa"})
+    chapter_data = {}
+
+    if toc:
+        for i in toc.find_all("a"):
+            match = re.match(r"Chapter (\d+\w*)\.-(.+)", i.text.strip())
+            if match:
+                chapter_data[match.group(1)] = match.group(2)
+
+    return chapter_data
+
+# Function to fetch chapter/section details
+async def get_title(title_url, title, toc_list, collection_path):
+    print(f"📖 Fetching {title} from {title_url}...")
+    
+    chapter_content = await get_content(title_url, collection_path)
+    if not chapter_content:
+        return {}
+
+    article_data = {}
+    toc = chapter_content.find("div", {"class": "ksa"})
+
+    if toc:
+        for i in toc.find_all("li"):
+            article_text = i.find("a", {"class": "collapsed"})
+            if article_text:
+                match = re.match(r"Article ([0-9a-z]+)\.-(.+)", article_text.text.strip())
+                if match:
+                    article_data[match.group(1)] = match.group(2)
+
+    for art in article_data.keys():
+        path = os.path.join(collection_path, f"{title}_{art}.xml")
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(CHAPTER_TEXT + "\n")
+            file.write(f"<p class=\"c1\">CHAPTER {title}. {toc_list[title].upper()}</p>\n")
+            file.write(f"<p class=\"c1\">ARTICLE {art}. {article_data[art].upper()}</p>\n")
+            
+            for sec in toc.find_all("a", href=True, recursive=True):
+                act_href = base_url + sec.get("href")
+                ch = act_href.split("/")[-1].split("_")[-2]
+                ch = re.sub(r'^([0]+)', r'', ch)
+                
+                if art == ch:
+                    data = await get_file(act_href)
+                    dom = etree.HTML(str(data))
+
+                    for pa in dom.xpath("//p"):
+                        para = etree.tostring(pa).decode('utf-8').strip()
+                        para = para.replace("&#13;", "")
+                        para = re.sub(r'<span class="sup">(.+?)</span>', r'\1', para)
+                        para = re.sub(r'<span class="sub">(.+?)</span>', r'\1', para)
+                        para = re.sub(r'<a([^<>]+)>([^<>]+)</a>', r'\2', para)
+                        para = re.sub(r'<span([^<>]*)class="stat_number"([^<>]*)>\s*(.+?)\s*</span>', '<h1 class="c2">\3</h1>', para)
+                        para = re.sub(r'<p>([a-z])(.+?)</p>', r'<h2>(\1)\2</h2>', para)
+                        para = re.sub(r'<p>([A-Z])(.+?)</p>', r'<h2>(\1)\2</h2>', para)
+                        para = re.sub(r'<p>(\d+)(.+?)</p>', r'<h3>(\1)\2</h3>', para)
+                        para = re.sub(r'<p><h1 class="c2">([^<>]+)</h1>\s+</p>', '<h1 class="c2">\1 Repealed.</h1>', para)
+                        para = re.sub(r'<p>History(.+?)</p>', '', para)
+                        file.write(para + "\n")
+            file.write("\n</div>\n</body>")
+    return article_data
+
+# Main async function to process titles
+async def process_titles():
+    title_urls = await get_title_dict(main_url, master_directory)
+    
+    print(f"Found {len(title_urls)} titles. Processing...")
+
+    for title, title_url in title_urls.items():
+        collection_path = os.path.join(master_directory, f"Title_{title}")
+        os.makedirs(collection_path, exist_ok=True)
+
+        toc_list = await get_title_dict(title_url, collection_path)
+        await get_title(title_url, title, toc_list, collection_path)
+
+# Run the script
+if __name__ == "__main__":
+    asyncio.run(process_titles())
