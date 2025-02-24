@@ -1,0 +1,176 @@
+
+
+
+import re
+import os
+import json
+import asyncio
+import aiohttp
+from datetime import datetime
+from bs4 import BeautifulSoup
+from lxml import etree
+from Utilities.DB_connection import connect_to_mongodb
+from Utilities.config import configureation
+from Utilities.logging_config import setup_logging
+
+# Load Configuration
+config_yml = configureation()
+config_data = requests.get(config_yml['config_path'])
+config_da = config_data.json()
+config = config_da['propertySources'][0]['source']
+
+# Setup Logging
+setup_logging()
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://gc.nh.gov/rsa/html/"
+CHAPTER_TEXT = """<?xml version="1.0"?>
+
+<body>  
+<div class="WordSection1">"""
+
+async def get_file(act_href):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(act_href, headers={'User-Agent': 'Mozilla/5.0'}, timeout=180) as response:
+            try:
+                detail_html_Acts = await response.text()
+            except Exception as r:
+                logger.error(f"Unable to get NH website content {act_href}. \n Website return info: {r}")
+                return ""
+            
+            soup = BeautifulSoup(detail_html_Acts, 'html.parser')  
+            download_content = soup.find("div", {"id": "print"})  
+            if download_content:
+                for table in download_content.find_all('table'):  
+                    table.decompose()  # Remove unwanted tables
+                return str(download_content)  
+            return ""
+
+async def download_NH_input(url, base_url, title, download, collection_path):
+    collection_path = os.path.join(collection_path, f"Title_{title}")
+    if not os.path.exists(collection_path):
+        os.makedirs(collection_path)
+
+    toc_list = await get_title_dict(url, collection_path)  
+    if title != '':  
+        title_url = re.sub(r'nhtoc\.htm', r'nhtoc/NHTOC-', url)  
+        title_url = title_url + title + ".htm"  
+        ack = await get_title(title_url, title, toc_list, collection_path)  
+
+        with connect_to_mongodb() as client:  
+            logger.info(f"Connected to {config['docdb']} database")  
+            db = client[config['docdb']]  
+            collection = db[config['collection_name']]  
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:  
+                task_id = book["taskId"]  
+                query = {"taskId": task_id}  
+                file_details = []  
+                for file in ack.keys():  
+                    # Fetch section file content
+                    act_href = f"{BASE_URL}{title}/{file}.htm"
+                    data = await get_file(act_href)
+                    dom = etree.HTML(str(data))
+
+                    # Clean content
+                    cleaned_content = ""
+                    for pa in dom.xpath("//p"):  
+                        para = etree.tostring(pa).decode('utf-8').strip()  
+                        para = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', para)  # Remove spans
+                        para = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', para)  # Remove links
+                        para = re.sub(r'<p>\s*</p>', '', para)  # Remove empty paragraphs
+                        para = re.sub(r'<p>([a-z0-9]+)(.+?)</p>', r'<h2>(\1) \2</h2>', para)  # Format pointers
+                        para = re.sub(r'<p><h1 class="c2">([^<>]+)</h1>\s+</p>', '<h1 class="c2">\1 Repealed.</h1>', para)  # Mark repealed
+                        para = re.sub(r'History:(.+?)</p>', r'<p class="gc.nh.gov"><span class="history"> History: </span>\1</p>', para)  # Format history
+                        para = re.sub(r'\s+', ' ', para)  # Remove extra spaces
+                        cleaned_content += para + "\n"
+
+                    # Save cleaned XML file
+                    xml_filename = os.path.join(collection_path, f'{title}_{file}.xml')
+                    with open(xml_filename, 'w', encoding='utf-8') as f:
+                        f.write(CHAPTER_TEXT + "\n")
+                        f.write(f"<p class=\"c1\">CHAPTER {title}. {toc_list[title].upper()}</p>\n")
+                        f.write(f"<p class=\"c1\">SECTION {file}</p>\n")
+                        f.write(cleaned_content)
+                        f.write("\n</div>\n</body>")
+                    
+                    details = {  
+                        "Name": f"{title}_{file}.xml",  
+                        "collection": "true",  
+                        "common_conversion": "",  
+                        "mncr_conversion": "",  
+                        "meta": "",  
+                        "toc": "",  
+                        "type": config['NH_seclevel'],  
+                        "titleName": ack[file],  
+                        "normCite": ""  
+                    }  
+                    file_details.append(details)  
+
+                # Update MongoDB
+                con_values = {"$set": {"fileDetail": file_details}}  
+                collection.update_one(query, con_values)  
+                total_file = len(ack)  
+                total = {"$set": {"totalFiles": total_file, "finalStage": "Conversion"}}  
+                collection.update_one(query, total)  
+                logger.info(f"Title {title} inserted into {config['collection_name']} collection")  
+            
+            client.close()  
+            logger.info(f"Title {title} Conversion in progress")  
+        return ack  
+    return {}
+
+async def validate_NH_input(url, base_url, download, collection_path):
+    with connect_to_mongodb() as client:
+        logger.info(f"Connected to {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+        done = []
+        wip = []
+
+        for tn in download.download:  
+            title = tn.firstLeveno  
+            doc_title = tn.firstLeveltitle  
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:  
+                downloaded_titles = {  
+                    "title": title,  
+                    "downloadDate": book["downloadDate"]  
+                }  
+                done.append(downloaded_titles)  
+            else:  
+                wip_titles = {  
+                    "Num": title,  
+                    "Title": doc_title,  
+                    "jX": download.jx,  
+                    "createdBy": download.createdBy,  
+                    "createdDate": download.createdDate  
+                }  
+                wip.append(wip_titles)  
+
+        for download in wip:  
+            title = download['Num']  
+            asyncio.create_task(download_NH_input(url, base_url, title, download, collection_path))  
+
+        query = {"taskId": {"$regex": "^NH"}}  
+        task_count = collection.count_documents(query) + 1  
+        task_id = f"NH{task_count}"
+
+        current_date = datetime.now().strftime("%Y-%m-%d")  
+        create_date = download['createdDate'] if isinstance(download['createdDate'], datetime) else download['createdDate']
+
+        title_details = {  
+            "jx": download['jX'],  
+            "createdBy": download['createdBy'],  
+            "createdDate": create_date,  
+            "titleNo": title,  
+            "titleName": download['Title'],  
+            "downloadDate": current_date,  
+            "totalFiles": 0,  
+            "fileDetail": [],  
+            "finalStage": "Collection",  
+            "finalStatus": "In Progress",  
+            "taskId": task_id  
+        }  
+        collection.insert_one(title_details)  
+        logger.info(f"Title {title} inserted into {config['collection_name']} collection")  
+    return done, wip
+
