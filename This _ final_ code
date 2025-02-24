@@ -1,5 +1,60 @@
 
 
+
+
+import xml.etree.ElementTree as ET
+import asyncio
+
+async def toc_NH(url, base_url, collection_path):
+    """
+    Fetch and generate the Table of Contents (TOC) for New Hampshire RSA Titles.
+    
+    Args:
+        url (str): The main URL to fetch the TOC from.
+        base_url (str): Base URL for constructing links.
+        collection_path (str): Directory path to store the TOC file.
+        
+    Returns:
+        str: XML representation of the TOC.
+    """
+    
+    def dict_to_xml(tag, data_dict):
+        """
+        Convert a dictionary to an XML structure.
+
+        Args:
+            tag (str): Root XML tag name.
+            data_dict (dict): Dictionary containing TOC data.
+
+        Returns:
+            ET.Element: XML ElementTree structure.
+        """
+        root = ET.Element(tag)
+        for key, val in data_dict.items():
+            child = ET.Element("chunk")
+            child.set("label", key)
+            child.set("title", val)
+            root.append(child)
+        return root
+
+    # Fetch the TOC page content
+    toc_list = await get_title_dict(url, collection_path)
+
+    # Convert TOC to XML
+    root = dict_to_xml("hierarchy", toc_list)
+    xml_str = ET.tostring(root, encoding="unicode")
+
+    # Save TOC XML file
+    toc_filename = os.path.join(collection_path, "NH_TOC.xml")
+    with open(toc_filename, "w", encoding="utf-8") as toc_file:
+        toc_file.write(xml_str)
+
+    print(f"✅ TOC file saved: {toc_filename}")
+    return xml_str
+
+
+
+
 async def download_NH_input(url, base_url, title, download, collection_path):
     """Download and process NH legal statutes by title"""
     
