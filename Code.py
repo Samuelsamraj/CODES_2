@@ -1,4 +1,92 @@
 
+
+
+
+
+
+if title:
+    title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url)
+    title_url = title_url + title + ".htm"
+
+    ack = await fetch_title(title_url, title, toc_list, collection_path)
+
+    if not ack:
+        logger.warning(f"No titles found for {title}")
+        return None  # Handle this gracefully
+
+    with connect_to_mongodb() as client:
+        logger.info(f"Connected to {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+
+        if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:
+            task_id = book["taskId"]
+            query = {"taskId": task_id}
+            file_details = []
+
+            for file in ack.keys():
+                details = {
+                    "Name": f"{title}_{file}.xml",
+                    "collection": "true",
+                    "common_conversion": "",
+                    "mncr_conversion": "",
+                    "meta": "",
+                    "toc": "",
+                    "type": config['NH_seclevel'],
+                    "titleName": ack[file],
+                    "normCite": ""
+                }
+                file_details.append(details)
+
+            con_values = {"$set": {"fileDetail": file_details}}
+            collection.update_one(query, con_values)
+
+            total_file = len(ack)
+            total = {"$set": {"totalFiles": total_file, "finalStage": "Conversion"}}
+            collection.update_one(query, total)
+
+            logger.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+        client.close()
+        logger.info(f"Title {title} Conversion in progress")
+
+        conv_url = config_yml['convert_request']
+        payload = json.dumps({
+            "data": {
+                "createdBy": "",
+                "createdDate": datetime.now().strftime("%Y-%m-%d"),
+                "firstleveno": f"{title}",
+                "jx": "NH",
+                "firstLeveltitle": ""
+            },
+            "additionalParam": {
+                "convRawXm1": "yes",
+                "convMncrXm1": "string"
+            }
+        }, indent=4)
+
+        headers = {'Content-Type': 'application/json'}
+        logger.info(f"Payload {payload}")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(conv_url, headers=headers, data=payload) as response:
+                    request_resp = await response.text()
+                    logger.info(f"Conversion request sent for {title}")
+        except Exception as e:
+            logger.error(f"Conversion request failed for {title} {e}")
+
+    return ack
+else:
+    for title_num, div_value in toc_list.items():
+        title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url)
+        title_url = title_url + title_num + ".htm"
+        message = await fetch_title(title_url, title_num, toc_list, collection_path)
+
+    return message
+
+
+
 import os import time import requests from bs4 import BeautifulSoup import re
 
 CHAPTER_TEXT = """<?xml version="1.0"?>
