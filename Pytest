@@ -1,0 +1,113 @@
+
+
+import pytest
+import mongomock
+from NH_Scraper import (
+    get_title_dict,
+    fetch_title,
+    fetch_chapter,
+    fetch_section,
+    download_NH_input,
+    validate_NH_input,
+    toc_NH
+)
+import os
+
+@pytest.fixture
+def mock_mongo():
+    """Create a mock MongoDB instance."""
+    client = mongomock.MongoClient()
+    db = client['test_db']
+    return db
+
+@pytest.mark.asyncio
+async def test_fetch_main_page():
+    """Test fetching the main NH RSA page."""
+    titles = await get_title_dict()
+    assert isinstance(titles, dict)
+    assert len(titles) > 0, "No titles found. Check website availability."
+
+@pytest.mark.asyncio
+async def test_fetch_title():
+    """Test fetching a title and its chapters."""
+    test_title = "Title I: General Provisions"
+    test_url = "https://gc.nh.gov/rsa/html/NHTOC/title-i.htm"
+
+    result = await fetch_title(test_title, test_url)
+    assert isinstance(result, dict)
+    assert "chapters" in result
+    assert len(result["chapters"]) > 0, "No chapters found for test title."
+
+@pytest.mark.asyncio
+async def test_fetch_chapter():
+    """Test fetching a chapter and checking sections."""
+    test_chapter = "Chapter 1"
+    test_url = "https://gc.nh.gov/rsa/html/NHTOC/title-i-ch1.htm"
+    test_title = "Title I"
+    test_directory = "./test_output"
+
+    os.makedirs(test_directory, exist_ok=True)
+
+    result = await fetch_chapter(test_chapter, test_url, test_title, test_directory)
+    assert result is not None, "Chapter fetching failed."
+    assert os.path.exists(test_directory), "Output directory not created."
+
+@pytest.mark.asyncio
+async def test_fetch_section():
+    """Test fetching a section and ensuring content exists."""
+    test_section_url = "https://gc.nh.gov/rsa/html/NHTOC/title-i-ch1-sec1.htm"
+    test_chapter = "Chapter 1"
+    test_title = "Title I"
+    test_directory = "./test_output"
+
+    result = await fetch_section(test_section_url, test_chapter, test_title, test_directory)
+    assert result is not None, "Failed to fetch section content."
+    assert os.path.exists(result), "XML file was not created."
+
+@pytest.mark.asyncio
+async def test_download_NH_input(mock_mongo):
+    """Test downloading NH input and storing in MongoDB mock."""
+    test_url = "https://gc.nh.gov/rsa/html/nhtoc.htm"
+    base_url = "https://gc.nh.gov/rsa/html/"
+    test_title = "Title I"
+    test_directory = "./test_output"
+
+    result = await download_NH_input(test_url, base_url, test_title, {}, test_directory)
+    assert isinstance(result, dict), "Download function did not return a dictionary."
+    assert len(result) > 0, "No data was fetched for Title I."
+
+@pytest.mark.asyncio
+async def test_validate_NH_input(mock_mongo):
+    """Test validation of NH input with MongoDB."""
+    test_url = "https://gc.nh.gov/rsa/html/nhtoc.htm"
+    base_url = "https://gc.nh.gov/rsa/html/"
+    test_directory = "./test_output"
+
+    download_mock = {
+        "download": [
+            {
+                "firstLeveno": "Title I",
+                "firstLeveltitle": "General Provisions",
+                "jx": "NH",
+                "createdBy": "test_user",
+                "createdDate": "2025-02-24"
+            }
+        ]
+    }
+
+    done, wip = await validate_NH_input(test_url, base_url, download_mock, test_directory)
+    assert isinstance(done, list), "Validation did not return a list of completed tasks."
+    assert isinstance(wip, list), "Validation did not return a list of pending tasks."
+
+@pytest.mark.asyncio
+async def test_toc_NH():
+    """Test TOC generation"""
+    test_url = "https://gc.nh.gov/rsa/html/nhtoc.htm"
+    base_url = "https://gc.nh.gov/rsa/html/"
+    test_directory = "./test_output"
+
+    result = await toc_NH(test_url, base_url, test_directory)
+    assert isinstance(result, str), "TOC generation failed."
+    assert os.path.exists(os.path.join(test_directory, "NH_TOC.xml")), "TOC XML file was not created."
+
+
