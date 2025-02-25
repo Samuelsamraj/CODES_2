@@ -103,6 +103,69 @@ for chapter_name, chapter_url in chapter_urls:
     chapter_content += f'\n<p class="c1">{chapter_name}</p>'
 
     sections = section_soup.find_all('center')
+
+
+
+
+
+
+    async def fetch_section(section_url, chapter_name, title_name):
+    """Fetch section data and return formatted content for MongoDB storage"""
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None
+
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+
+    chapter_content = {
+        "title_name": title_name,
+        "chapter_name": chapter_name,
+        "sections": []
+    }
+
+    sections = section_soup.find_all('center')
+    seen_sections = set()
+    section_count = 0
+
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+            
+            if section_text in seen_sections:
+                continue
+            seen_sections.add(section_text)
+
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+
+            formatted_content = [
+                {"type": "h3", "text": line.strip()} if re.match(r"^?[a-z0-9]+?\.", line.strip()) else {"type": "p", "text": line.strip()}
+                for line in section_content_text.split("\n") if line.strip()
+            ]
+
+            chapter_content["sections"].append({
+                "section_title": section_text,
+                "content": formatted_content
+            })
+
+            source_note = section.find_next('sourcenote')
+            if source_note:
+                history_text = source_note.get_text(" ", strip=True)
+                chapter_content["sections"][-1]["history"] = history_text
+
+            section_count += 1
+
+    if section_count > 0:
+        return chapter_content
+    else:
+        logger.warning(f"No sections found for {chapter_name}. Skipping.")
+        return None
+
+
+        
     section_count = 0
     for section in sections:
         section_title = section.find('h3')
@@ -140,4 +203,118 @@ for chapter_name, chapter_url in chapter_urls:
     print(f"✅ Saved {section_count} sections in {xml_filename}")
 
 print("\n✅ All titles and chapters processed successfully!")
+
+
+
+
+
+
+async def fetch_section(section_url, chapter_name, title_name):
+    """Fetch section data and return formatted content for MongoDB storage"""
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None
+
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+
+    chapter_content = {
+        "title_name": title_name,
+        "chapter_name": chapter_name,
+        "sections": []
+    }
+
+    sections = section_soup.find_all('center')
+    seen_sections = set()
+    section_count = 0
+
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+            
+            if section_text in seen_sections:
+                continue
+            seen_sections.add(section_text)
+
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+
+            formatted_content = [
+                {"type": "h3", "text": line.strip()} if re.match(r"^?[a-z0-9]+?\.", line.strip()) else {"type": "p", "text": line.strip()}
+                for line in section_content_text.split("\n") if line.strip()
+            ]
+
+            chapter_content["sections"].append({
+                "section_title": section_text,
+                "content": formatted_content
+            })
+
+            source_note = section.find_next('sourcenote')
+            if source_note:
+                history_text = source_note.get_text(" ", strip=True)
+                chapter_content["sections"][-1]["history"] = history_text
+
+            section_count += 1
+
+    if section_count > 0:
+        return chapter_content
+    else:
+        logger.warning(f"No sections found for {chapter_name}. Skipping.")
+        return None
+
+
+
+
+
+
+async def download_NH_input(url, base_url, title, download):
+    """Download and process NH legal statutes and store in MongoDB"""
+    
+    toc_list = await get_title_dict(url)
+
+    if title:
+        title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url) + title + ".htm"
+        ack = await fetch_title(title, title_url)
+
+        with connect_to_mongodb() as client:
+            logger.info(f"Connected to {config['docdb']} database")
+            db = client[config['docdb']]
+            collection = db[config['collection_name']]
+
+            if (book := collection.find_one({"jx": 'NH', "titleNo": title, "isDeleted": {"$exists": False}})) is not None:
+                task_id = book["taskId"]
+                query = {"taskId": task_id}
+                file_details = []
+
+                for chapter_name, chapter_url in ack["chapters"].items():
+                    chapter_data = await fetch_chapter(chapter_name, chapter_url, ack["title_name"])
+                    
+                    if chapter_data:
+                        details = {
+                            "Name": f"{title}_{chapter_name}",
+                            "content": chapter_data,
+                            "type": config['NH_seclevel'],
+                            "titleName": chapter_name
+                        }
+                        file_details.append(details)
+                        collection.insert_one(details)
+
+                con_values = {"$set": {"fileDetail": file_details}}
+                collection.update_one(query, con_values)
+
+                total_files = len(file_details)
+                collection.update_one(query, {"$set": {"totalFiles": total_files, "finalStage": "Conversion"}})
+
+                logger.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+            client.close()
+            logger.info(f"Title {title} Conversion in progress")
+
+        return ack
+    else:
+        for title_num in toc_list.keys():
+            title_url = re.sub(r'nhtoc\.htm', r'NHTOC/nhtoc_ch', url) + title_num + ".htm"
+            await fetch_title(title_num, title_url)
 
