@@ -5,6 +5,115 @@
 
 
 
+import os
+import json
+import logging
+import asyncio
+from datetime import datetime, date
+from pymongo import MongoClient
+from Utilities.DB_connection import connect_to_mongodb
+
+async def download_NH_input(url, base_url, title, download, collection_path):
+    """
+    Download and process NH legal statutes, extract content, and store it in MongoDB.
+    """
+    logger.info(f"Starting download for Title: {title}")
+
+    # Define and create the collection path
+    collection_path = os.path.join(collection_path, f"Title_{title}")
+    if not os.path.exists(collection_path):
+        os.makedirs(collection_path)
+
+    # Fetch title URL from `fetch_title()`
+    ack = await fetch_title(title, url)
+    if not ack:
+        logger.error(f"ERROR: Failed to fetch title {title}. URL might be incorrect.")
+        return None
+
+    title_url = ack.get("title_url", "")
+    if not title_url:
+        logger.error(f"ERROR: No valid URL found for title {title}")
+        return None
+
+    logger.info(f"Fetched title successfully: {title} | URL: {title_url}")
+
+    with connect_to_mongodb() as client:
+        logging.info(f"Connected to MongoDB: {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+
+        # Generate unique Task ID
+        query = {"taskId": {"$regex": "^NH"}}
+        task_id = collection.count_documents(query) + 1
+        task_id = f'NH{task_id}'
+
+        logger.info(f"Generated Task ID: {task_id}")
+
+        # Get current date
+        current_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Validate created date
+        create_date = download.get('createdDate', current_date)
+        if isinstance(create_date, date):
+            create_date = create_date.isoformat()
+
+        file_details = []
+
+        for chapter_name, chapter_url in ack["chapters"].items():
+            chapter_data = await fetch_chapter(chapter_name, chapter_url, ack["title_name"], collection_path)
+
+            if chapter_data:
+                # Extract chapter number format (e.g., 201, 201-A)
+                chapter_match = re.search(r'CHAPTER (\d+[A-Z\-]*)', chapter_name, re.IGNORECASE)
+                chapter_number = chapter_match.group(1) if chapter_match else "Unknown"
+
+                # Keep Roman numerals in the title
+                title_label = ack["title_name"].split(":")[0].replace("TITLE", "").strip()
+
+                # Generate filename (e.g., III_201.xml, III_201_A.xml)
+                filename = f"{title_label}_{chapter_number}.xml"
+
+                details = {
+                    "Name": filename,
+                    "collection": "true",
+                    "common_conversion": "",
+                    "mncr_conversion": "",
+                    "meta": "",
+                    "toc": "",
+                    "type": config['NH_seclevel'],
+                    "titleName": chapter_name,
+                    "normCite": ""
+                }
+                file_details.append(details)
+
+                # Save XML content locally
+                file_path = os.path.join(collection_path, filename)
+                with open(file_path, "w", encoding="utf-8") as file:
+                    json.dump(chapter_data, file, indent=4)
+
+        # Insert task details in MongoDB
+        title_details = {
+            "jx": download["jX"],
+            "createdBy": download["createdBy"],
+            "createdDate": create_date,
+            "titleNo": title,
+            "titleName": download["Title"],
+            "downloadDate": current_date,
+            "totalFiles": len(file_details),
+            "fileDetail": file_details,
+            "finalStage": "Conversion",
+            "finalStatus": "In Progress",
+            "taskId": task_id
+        }
+        collection.insert_one(title_details)
+
+        logging.info(f"Inserted Title {title} into MongoDB collection: {config['collection_name']}")
+
+    client.close()
+    logging.info(f"Title {title} Conversion in progress")
+
+    return ack
+
 new
 
 
