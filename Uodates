@@ -4,6 +4,201 @@
 
 
 
+import os
+import aiohttp
+import asyncio
+import logging
+import re
+import json
+import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
+from datetime import datetime, date
+from Utilities.DB_connection import connect_to_mongodb
+from Utilities.config import configureation
+
+# Load configuration
+config = configureation()
+
+# Constants
+BASE_URL = "https://gc.nh.gov/rsa/html/"
+MAIN_URL = "https://gc.nh.gov/rsa/html/nhtoc.htm"
+HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
+# Logger Setup
+logger = logging.getLogger(__name__)
+
+async def get_content(url):
+    """Fetch content asynchronously from a URL"""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=180) as response:
+                response.raise_for_status()
+                return BeautifulSoup(await response.text(), 'html.parser')
+        except Exception as e:
+            logger.error(f"Unable to fetch content from {url}: {e}")
+            return None
+
+async def get_title_dict():
+    """Fetch title dictionary from the main TOC page"""
+    soup = await get_content(MAIN_URL)
+    if not soup:
+        return {}
+
+    title_links = soup.find_all('a', href=True)
+    return {
+        a.text.strip(): BASE_URL + a['href'].replace("../", "NHTOC/")
+        for a in title_links if 'NHTOC/' in a['href']
+    }
+
+async def fetch_title(title_name, title_url):
+    """Fetch and process each title"""
+    logger.info(f"Fetching title: {title_name} | URL: {title_url}")
+
+    title_soup = await get_content(title_url)
+    if not title_soup:
+        logger.error(f"Failed to fetch HTML for {title_name}")
+        return {}
+
+    chapter_links = title_soup.find_all('a', href=True)
+    chapter_urls = {
+        a.text.strip(): BASE_URL + "NHTOC/" + a['href']
+        for a in chapter_links if 'NHTOC-' in a['href']
+    }
+
+    return {"title_name": title_name, "title_url": title_url, "chapters": chapter_urls}
+
+async def fetch_chapter(chapter_name, chapter_url, title_name, collection_path):
+    """Fetch and process each chapter"""
+    logger.info(f"Fetching chapter: {chapter_name} from {chapter_url}")
+
+    chapter_soup = await get_content(chapter_url)
+    if not chapter_soup:
+        return None
+
+    # Extract the section URL from the page
+    section_link_tag = next(
+        (a_tag for h2_tag in chapter_soup.find_all('h2') if (a_tag := h2_tag.find('a', href=True)) and "../" in a_tag["href"]),
+        None
+    )
+
+    if not section_link_tag:
+        logger.warning(f"Skipping {chapter_name}: No valid section link found.")
+        return None
+
+    section_url = BASE_URL + section_link_tag['href'].replace('../', '')
+    return await fetch_section(section_url, chapter_name, title_name, collection_path)
+
+async def fetch_section(section_url, chapter_name, title_name, collection_path):
+    """Fetch section data and return formatted content"""
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None
+
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+
+    # Ensure correct title format (Roman numeral + chapter number)
+    title_label = title_name.split()[1]  # Extract the Roman numeral
+    chapter_number = re.search(r'CHAPTER (\d+[A-Z\-]*)', chapter_name, re.IGNORECASE)
+    chapter_label = chapter_number.group(1) if chapter_number else "Unknown"
+
+    filename = f"{title_label}_{chapter_label}.xml"
+    file_path = os.path.join(collection_path, filename)
+
+    # Extract content
+    sections = section_soup.find_all('center')
+    section_texts = []
+    for section in sections:
+        text = section.get_text("\n").strip()
+        section_texts.append(text)
+
+    # Save to XML format
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(section_texts))
+
+    logger.info(f"Saved section {chapter_name} to {file_path}")
+
+    return filename
+
+async def download_NH_input(url, base_url, title, download, collection_path):
+    """Download and process NH legal statutes and store in MongoDB"""
+    collection_path = os.path.join(collection_path, f"Title_{title}")
+    if not os.path.exists(collection_path):
+        os.makedirs(collection_path)
+
+    toc_list = await get_title_dict()
+
+    if title:
+        title_data = await fetch_title(title, toc_list.get(title, ""))
+        if not title_data:
+            return None
+
+        with connect_to_mongodb() as client:
+            logging.info(f"Connected to {config['docdb']} database")
+            db = client[config['docdb']]
+            collection = db[config['collection_name']]
+
+            task_id = collection.count_documents({"taskId": {"$regex": "^NH"}}) + 1
+            task_id = f"NH{task_id}"
+
+            file_details = []
+            for chapter_name, chapter_url in title_data["chapters"].items():
+                chapter_file = await fetch_chapter(chapter_name, chapter_url, title_data["title_name"], collection_path)
+                if chapter_file:
+                    file_details.append({
+                        "Name": chapter_file,
+                        "collection": "true",
+                        "common_conversion": "",
+                        "mncr_conversion": "",
+                        "meta": "",
+                        "toc": "",
+                        "type": "NH",
+                        "titleName": title_data["title_name"],
+                        "normCite": ""
+                    })
+
+            # Store in MongoDB
+            title_details = {
+                "jX": download['jX'],
+                "createdBy": download['createdBy'],
+                "createdDate": download['createdDate'].isoformat() if isinstance(download['createdDate'], date) else download['createdDate'],
+                "titleNo": title,
+                "titleName": download['Title'],
+                "downloadDate": datetime.now().strftime("%Y-%m-%d"),
+                "totalFiles": len(file_details),
+                "fileDetail": file_details,
+                "finalStage": "Conversion",
+                "finalStatus": "In Progress",
+                "taskId": task_id
+            }
+
+            collection.insert_one(title_details)
+            logging.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+        return title_data
+
+    return None
+
+async def toc_NH():
+    """Generate Table of Contents for NH"""
+    toc_list = await get_title_dict()
+    root = ET.Element("hierarchy")
+
+    for key, val in toc_list.items():
+        title_number = key.split(':')[0].strip().replace("TITLE", "").strip()
+        title_name = key.split(':')[1].strip()
+
+        child = ET.Element("chunk")
+        child.set("label", title_number)
+        child.set("title", title_name)
+        root.append(child)
+
+    return ET.tostring(root, encoding="unicode")
+
+
+
+
 
 async def fetch_chapter(chapter_name, chapter_url, title_name, title_directory):
     """Fetch and process each chapter"""
