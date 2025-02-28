@@ -3,6 +3,105 @@
 
 
 
+
+
+new
+
+
+async def download_NH_input(url, base_url, title, download, Collection_path):
+    """Download and process NH legal statutes and store in MongoDB"""
+
+    Collection_path = os.path.join(Collection_path, f"Title_{title}")
+    if not os.path.exists(Collection_path):
+        os.makedirs(Collection_path)
+
+    # Fetch TOC List
+    toc_list = await get_title_dict()
+
+    if title:
+        # Get title URL from fetch_title()
+        title_url = toc_list.get(title, "")
+        ack = await fetch_title(title, title_url)
+
+        if not ack.get("chapters"):
+            logger.error(f"ERROR: No chapters found for title {title}. URL might be incorrect")
+            return None
+
+        with connect_to_mongodb() as client:
+            logging.info(f"Connected to {config['docdb']} database")
+            db = client[config['docdb']]
+            collection = db[config['collection_name']]
+
+            # Create task ID
+            query = {"taskId": {"$regex": "^NH"}}
+            taskId = collection.count_documents(query) + 1
+            taskId = f"NH{taskId}"
+            logging.info(f"Generated Task ID: {taskId}")
+
+            # Get current date
+            formatted_date = datetime.now().strftime("%Y-%m-%d")
+            createDate = download["createdDate"]
+            if isinstance(createDate, date):
+                createDate = createDate.isoformat()
+
+            fileDetail = []
+
+            for chapter_name, chapter_url in ack["chapters"].items():
+                chapter_data = await fetch_chapter(chapter_name, chapter_url, ack["title_name"], ack["directory"])
+
+                if chapter_data:
+                    # Generate structured filename (TitleNumber_ChapterNumber.xml)
+                    chapter_match = re.search(r'CHAPTER (\d+[A-Z\-]*)', chapter_name, re.IGNORECASE)
+                    chapter_number = chapter_match.group(1) if chapter_match else "Unknown"
+                    filename = f"{title}_{chapter_number}.xml"
+                    file_path = os.path.join(Collection_path, filename)
+
+                    # Save as XML file
+                    with open(file_path, "w", encoding="utf-8") as file:
+                        json.dump(chapter_data, file, indent=4)
+
+                    details = {
+                        "Name": filename,
+                        "collection": "true",
+                        "common_conversion": "",
+                        "mncr_conversion": "",
+                        "meta": "",
+                        "toc": "",
+                        "type": config["NH_seclevel"],
+                        "titleName": chapter_name,
+                        "normCite": ""
+                    }
+                    fileDetail.append(details)
+
+            # Insert title details into MongoDB
+            title_details = {
+                "jX": download["jX"],
+                "createdBy": download["createdBy"],
+                "createdDate": createDate,
+                "titleNo": title,
+                "titleName": download["Title"],
+                "downloadDate": formatted_date,
+                "totalFiles": len(ack),
+                "fileDetail": fileDetail,
+                "finalStage": "Conversion",
+                "finalStatus": "In Progress",
+                "taskId": taskId
+            }
+            collection.insert_one(title_details)
+            logging.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+        client.close()
+        return ack
+
+    else:
+        for title_num, _ in toc_list.items():
+            title_url = toc_list.get(title_num, "")
+            message = await fetch_title(title_num, title_url)
+        return message
+
+
+
+
 async def download_NH_input(url, base_url, title, download, Collection_path):
     """Download and process NH legal statutes and store in MongoDB"""
 
