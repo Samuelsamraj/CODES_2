@@ -1,6 +1,113 @@
 
 
 
+
+
+async def download_NH_input(url, base_url, title, download, Collection_path):
+    """Download and process NH legal statutes and store in MongoDB"""
+
+    Collection_path = os.path.join(Collection_path, f"Title_{title}")
+    if not os.path.exists(Collection_path):
+        os.makedirs(Collection_path)
+
+    # Fetch TOC List
+    toc_list = await get_title_dict()
+
+    if title:
+        title_url = toc_list.get(title, "")
+        ack = await fetch_title(title, title_url)
+
+        if not ack.get("chapters"):
+            logger.error(f"ERROR: No chapters found for title {title}. URL might be incorrect")
+            return None
+
+        with connect_to_mongodb() as client:
+            logging.info(f"Connected to {config['docdb']} database")
+            db = client[config['docdb']]
+            collection = db[config['collection_name']]
+
+            # Check if the title exists in MongoDB
+            if (book := collection.find_one({"jx": "NH", "titleNo": title, "isDeleted": {"$exists": False}})) is not None:
+                task_id = book["taskId"]
+                query = {"taskId": task_id}
+                file_details = []
+
+                for chapter_name, chapter_url in ack["chapters"].items():
+                    chapter_data = await fetch_chapter(chapter_name, chapter_url, ack["title_name"], ack["directory"])
+
+                    if chapter_data:
+                        # Extract Roman numeral title
+                        title_number = title.strip()
+
+                        # Extract chapter number
+                        chapter_match = re.search(r'CHAPTER (\d+[A-Z\-]*)', chapter_name, re.IGNORECASE)
+                        chapter_number = chapter_match.group(1) if chapter_match else "Unknown"
+
+                        # Generate filename (e.g., III_201.xml, III_201_A.xml)
+                        filename = f"{title_number}_{chapter_number}.xml"
+                        file_path = os.path.join(Collection_path, filename)
+
+                        # Save file in XML format
+                        with open(file_path, "w", encoding="utf-8") as file:
+                            json.dump(chapter_data, file, indent=4)
+
+                        details = {
+                            "Name": filename,
+                            "collection": "true",
+                            "common_conversion": "",
+                            "mncr_conversion": "",
+                            "meta": "",
+                            "toc": "",
+                            "type": config["NH_seclevel"],
+                            "titleName": chapter_name,
+                            "normCite": ""
+                        }
+                        file_details.append(details)
+
+                # Update MongoDB records
+                collection.update_one(query, {"$set": {"fileDetail": file_details}})
+                collection.update_one(query, {"$set": {"totalFiles": len(file_details), "finalStage": "Conversion"}})
+
+                logging.info(f"Title {title} inserted into {config['collection_name']} collection")
+
+            client.close()
+            logging.info(f"Title {title} Conversion in progress")
+
+            # Send conversion request
+            conv_url = config["convert_request"]
+            payload = json.dumps({
+                "data": {
+                    "jx": "NH",
+                    "createdBy": "",
+                    "createdDate": datetime.now().strftime("%Y-%m-%d"),
+                    "firstLeveno": f"{title}",
+                    "firstLeveltitle": ""
+                },
+                "additionalParam": {
+                    "convRawXm1": "yes",
+                    "convMncrXm1": "string"
+                }
+            }, indent=4)
+
+            headers = {"Content-Type": "application/json"}
+            logging.info(f"Payload {payload}")
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(conv_url, headers=headers, data=payload) as response:
+                        request_resp = await response.text()
+                        logging.info(f"Conversion request sent for {title}")
+            except Exception as e:
+                logging.error(f"Conversion request failed for {title} {e}")
+
+        return ack
+
+    else:
+        for title_num in toc_list.keys():
+            title_url = toc_list.get(title_num, "")
+            message = await fetch_title(title_num, title_url)
+        return message
+
 import os
 import aiohttp
 import asyncio
