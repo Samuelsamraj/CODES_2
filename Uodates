@@ -5,6 +5,100 @@
 
 
 
+async def fetch_chapter(chapter_name, chapter_url, title_name, title_directory):
+    """Fetch and process each chapter"""
+    logger.info(f"Fetching chapter: {chapter_name} from {chapter_url}")
+
+    chapter_soup = await get_content(chapter_url)
+    if not chapter_soup:
+        return None
+
+    body_tag = chapter_soup.find('body')
+    if not body_tag:
+        logger.warning(f"Skipping {chapter_name}: No <body> tag found.")
+        return None
+
+    # 🔹 Extract the correct section link (e.g., l/1/1-mrg.htm)
+    section_link_tag = next(
+        (a_tag for a_tag in body_tag.find_all('a', href=True) if "/l/" in a_tag["href"]),
+        None
+    )
+
+    if not section_link_tag:
+        logger.warning(f"Skipping {chapter_name}: No valid section link found.")
+        return None
+
+    section_url = BASE_URL + section_link_tag['href'].replace('../', '')
+    logger.info(f"Extracted section URL: {section_url}")
+
+    return await fetch_section(section_url, chapter_name, title_name, title_directory)
+
+
+async def fetch_section(section_url, chapter_name, title_name, title_directory):
+    """Fetch section data and return formatted XML"""
+    logger.info(f"Fetching section from {section_url}")
+
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None
+
+    # Extract the meta tag content (if available)
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+
+    # Start building XML content
+    chapter_content = CHAPTER_TEXT
+    chapter_content += f'\n<p class="c1">{title_name}</p>'
+    chapter_content += f'\n<p class="c1">{chapter_name}</p>'
+
+    sections = section_soup.find_all('center')
+    seen_sections = set()
+    section_count = 0
+
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+
+            if section_text in seen_sections:
+                continue
+            seen_sections.add(section_text)
+
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+
+            formatted_content = "\n".join([
+                f"<h3>{line.strip()}</h3>" if re.match(r"^[a-zA-Z0-9]+\.", line.strip()) else f"<p>{line.strip()}</p>"
+                for line in section_content_text.split("\n") if line.strip()
+            ])
+
+            chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
+            chapter_content += formatted_content
+
+            source_note = section.find_next('sourcenote')
+            if source_note:
+                history_text = source_note.get_text(" ", strip=True)
+                chapter_content += f'\n<p class="gc.nh.gov"><span class="history"> History: </span> {history_text}</p>'
+
+            section_count += 1
+
+    chapter_content += "\n</div>\n</body>"
+
+    if section_count > 0:
+        safe_chapter_name = chapter_name.replace(':', ' -').replace('/', '-').strip()
+        xml_filename = os.path.join(title_directory, f"{safe_chapter_name}.xml")
+        with open(xml_filename, 'w', encoding='utf-8') as f:
+            f.write(chapter_content)
+        logger.info(f"Saved {section_count} sections in {xml_filename}")
+        return xml_filename
+    else:
+        logger.warning(f"No sections found for {chapter_name}. Skipping.")
+        return None
+
+
+
+
 import os
 import json
 import logging
