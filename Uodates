@@ -417,3 +417,171 @@ async def toc_NH(url, Collection_path):
         root.append(child)
 
     return ET.tostring(root, encoding="unicode")
+
+
+
+
+3rd code 
+
+import sys
+import os
+import aiohttp
+import asyncio
+import nest_asyncio
+import json
+import logging
+import re
+import xml.etree.ElementTree as ET
+from datetime import datetime, date
+from bs4 import BeautifulSoup
+from pyppeteer import launch, errors
+from lxml import etree
+import requests
+from fastapi import FastAPI
+from Utilities.logging_config import setup_logging
+from Utilities.DB_connection import connect_to_mongodb
+from Utilities.config import configureation
+
+# Load configuration
+config = configureation()
+nest_asyncio.apply()
+setup_logging()
+logger = logging.getLogger(__name__)
+
+# Constants
+HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
+async def get_content(url):
+    """Fetch content asynchronously from a URL"""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=180) as response:
+                response.raise_for_status()
+                return BeautifulSoup(await response.text(), 'html.parser')
+        except Exception as e:
+            logger.error(f"Unable to fetch content from {url}: {e}")
+            return None
+
+async def get_title_dict(main_url):
+    """Fetch title dictionary from the main page"""
+    soup = await get_content(main_url)
+    if not soup:
+        return {}
+    
+    title_links = soup.find_all('a', href=True)
+    return {
+        a.text.strip(): main_url + a['href'].replace("../", "NHTOC/")
+        for a in title_links if 'NHTOC/' in a['href']
+    }
+
+async def fetch_title(title_name, title_url):
+    """Fetch and process each title"""
+    logger.info(f"Downloading title: {title_name}")
+    
+    title_soup = await get_content(title_url)
+    if not title_soup:
+        return {}
+    
+    chapter_links = title_soup.find_all('a', href=True)
+    chapter_urls = {
+        a.text.strip(): title_url + "NHTOC/" + a['href']
+        for a in chapter_links if 'NHTOC-' in a['href']
+    }
+    return {"title_name": title_name, "title_url": title_url, "chapters": chapter_urls}
+
+async def fetch_chapter(chapter_name, chapter_url):
+    """Fetch and process each chapter"""
+    logger.info(f"Fetching chapter: {chapter_name}")
+    
+    chapter_soup = await get_content(chapter_url)
+    if not chapter_soup:
+        return None
+    
+    body_tag = chapter_soup.find('body')
+    if not body_tag:
+        logger.warning(f"Skipping {chapter_name} - No <body> tag found.")
+        return None
+    
+    section_link_tag = next(
+        (a_tag for h2_tag in body_tag.find_all('h2') if (a_tag := h2_tag.find('a', href=True)) and "../" in a_tag["href"]),
+        None
+    )
+    
+    if not section_link_tag:
+        logger.warning(f"Skipping {chapter_name} - No valid section link found.")
+        return None
+    
+    section_url = chapter_url + section_link_tag['href'].replace('../', '')
+    return await fetch_section(section_url, chapter_name)
+
+async def fetch_section(section_url, chapter_name):
+    """Fetch section data and return formatted content"""
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None
+    
+    chapter_content = {
+        "chapter_name": chapter_name,
+        "sections": []
+    }
+    
+    sections = section_soup.find_all('center')
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+            formatted_content = [
+                {"type": "h3", "text": line.strip()} if re.match(r"^?[a-z0-9]+?\.", line.strip()) else {"type": "p", "text": line.strip()}
+                for line in section_content_text.split("\n") if line.strip()
+            ]
+            chapter_content["sections"].append({
+                "section_title": section_text,
+                "content": formatted_content
+            })
+    return chapter_content
+
+async def download_NH_input(url, title, collection_path):
+    """Download and process NH legal statutes and store in MongoDB"""
+    collection_path = os.path.join(collection_path, f"Title_{title}")
+    os.makedirs(collection_path, exist_ok=True)
+    
+    title_url = url + f"NHTOC/nhtoc_ch{title}.htm"
+    ack = await fetch_title(title, title_url)
+    
+    with connect_to_mongodb() as client:
+        logging.info(f"Connected to {config['docdb']} database")
+        db = client[config['docdb']]
+        collection = db[config['collection_name']]
+        
+        file_details = []
+        for chapter_name, chapter_url in ack["chapters"].items():
+            chapter_data = await fetch_chapter(chapter_name, chapter_url)
+            if chapter_data:
+                filename = f"{title}_{chapter_name}.xml"
+                details = {
+                    "Name": filename,
+                    "collection": "true",
+                    "type": config['NH_seclevel'],
+                    "titleName": chapter_name
+                }
+                file_details.append(details)
+                with open(os.path.join(collection_path, filename), "w", encoding="utf-8") as file:
+                    json.dump(chapter_data, file, indent=4)
+        
+        collection.update_one({"titleNo": title}, {"$set": {"fileDetail": file_details}})
+        client.close()
+    return ack
+
+async def toc_NH(main_url):
+    """Generate TOC for NH"""
+    toc_list = await get_title_dict(main_url)
+    root = ET.Element("hierarchy")
+    for key, val in toc_list.items():
+        child = ET.Element("chunk")
+        child.set("label", key.split(':')[0].strip().replace("TITLE", "").strip())
+        child.set("title", key.split(':')[1].strip())
+        root.append(child)
+    return ET.tostring(root, encoding="unicode")
+
