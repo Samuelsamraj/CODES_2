@@ -3,6 +3,60 @@
 
 
 
+async def fetch_title(title_name, title_url):
+    """Fetch and process each title."""
+    logger.info(f"Downloading title: {title_name} from {title_url}")
+
+    download_path = config['download_path']
+    safe_title_name = title_name.replace(':', '-').replace('/', '-').strip()
+    title_directory = os.path.join(download_path, safe_title_name)
+    os.makedirs(title_directory, exist_ok=True)
+
+    title_soup = await get_content(title_url)
+    if not title_soup:
+        return {}
+
+    chapter_links = title_soup.find_all('a', href=True)
+
+    # ✅ Fix: Keep exactly one "NHTOC/" in URL
+    chapter_urls = {
+        a.text.strip(): BASE_URL + a['href'].replace("../", "NHTOC/")  # Ensures correct format
+        for a in chapter_links if 'NHTOC-' in a['href']
+    }
+
+    return {"title_name": title_name, "title_url": title_url, "chapters": chapter_urls, "directory": title_directory}
+
+
+
+async def fetch_chapter(chapter_name, chapter_url, title_name, title_directory):
+    """Fetch and process each chapter."""
+    logger.info(f"Fetching chapter: {chapter_name} from {chapter_url}")
+
+    chapter_soup = await get_content(chapter_url)
+    if not chapter_soup:
+        return None
+
+    body_tag = chapter_soup.find('body')
+    if not body_tag:
+        logger.warning(f"Skipping {chapter_name} - No <body> tag found.")
+        return None
+
+    # ✅ Fix: Get the first valid link inside <body>
+    section_link_tag = next(
+        (a_tag for h2_tag in body_tag.find_all('h2') if (a_tag := h2_tag.find('a', href=True)) and "NHTOC-" in a_tag["href"]),
+        None
+    )
+
+    if not section_link_tag:
+        logger.warning(f"Skipping {chapter_name} - No valid section link found.")
+        return None
+
+    # ✅ Fix: Ensure only one "NHTOC/"
+    section_url = BASE_URL + section_link_tag['href'].replace("../", "NHTOC/")
+    logger.info(f"Found section link for {chapter_name}: {section_url}")
+
+    return await fetch_section(section_url, chapter_name, title_name)
+
 
 
 async def fetch_chapter(chapter_name, chapter_url, title_name, title_directory):
