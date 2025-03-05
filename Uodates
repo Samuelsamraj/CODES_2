@@ -3,6 +3,158 @@
 
 
 
+
+async def fetch_section(section_url, chapter_name, title_name, Collection_path):
+    """Fetch section data and return formatted XML."""
+    section_soup = await get_content(section_url)
+    if not section_soup:
+        return None, None
+
+    # Extract title name and chapter name from meta tags
+    meta_tag_2 = section_soup.find('meta', {'name': 'title'})
+    if meta_tag_2:
+        title_name = meta_tag_2['content'].strip()
+    safe_title_name = title_name.replace(':', '.')
+
+    meta_tag = section_soup.find('meta', {'name': 'chapter'})
+    if meta_tag:
+        chapter_name = meta_tag['content'].strip()
+
+    # Replace ": " with " -", and sanitize for the chapter name
+    safe_chapter_name = chapter_name.replace(':', '-').replace('/', '-').strip()
+
+    chapter_content = CHAPTER_TEXT
+    dl_counter = 1  # Initialize the counter for dl
+
+    # Add title_name with dl
+    chapter_content += f'\n<p class="c1" dl="{dl_counter}">{safe_title_name}</p>'
+    dl_counter += 1  # Increment dl counter
+
+    # Add chapter_name with dl
+    chapter_content += f'\n<p class="c1" dl="{dl_counter}">{safe_chapter_name}</p>'
+    dl_counter += 1  # Increment dl counter
+
+    # Add section title without dl to <h1> tags
+    dl_counter += 1  # Increment dl counter for the section title
+
+    sections = section_soup.find_all('center')
+    seen_sections = set()
+    section_count = 0
+    formatted_content = ""
+
+    for section in sections:
+        section_title_tag = section.find_next('b')
+        if section_title_tag:
+            section_text = section_title_tag.get_text(strip=True)
+            section_text = section_text.replace(" -", "")  # Remove " -"
+
+            # Replace colon with a dot in section title (for <h1> tags)
+            section_text = section_text.replace(":", ".")
+
+            if section_text in seen_sections:
+                continue
+            seen_sections.add(section_text)
+
+            section_content = section.find_next('codesect')
+            section_content_text = section_content.get_text("\n").strip() if section_content else "No content available"
+
+            # Add section title without dl to <h1> tags
+            chapter_content += f'\n<h1 class="c2">{section_text}</h1>'
+
+            dl_counter += 1  # Increment dl_counter for the section title
+
+            # Format section content
+            lines = section_content_text.split("\n")
+            current_article = None
+            current_sub_item = None
+            current_numbered_sub_item = None
+
+            for line in lines:
+                line = line.strip()
+                if line:
+                    # Match Article patterns like "Article I", "Article II", etc.
+                    article_match = re.match(r'^(Article [IVXLCDM]+)', line)
+                    if article_match:
+                        current_article = article_match.group(1)
+                        formatted_content += f'\n<p>{current_article}</p>'
+                        dl_counter += 1  # Increment dl_counter for the article title
+
+                    # Match sections like "I.", "II.", "III." etc.
+                    elif re.match(r'^[A-Z]+\.$', line):
+                        current_sub_item = line
+                        formatted_content += f'\n<h2>{current_sub_item}</h2>'
+
+                    elif re.match(r'^[A-Z]+\.\s.*', line):
+                        current_sub_item_with_content = line
+                        formatted_content += f'\n<h2>{current_sub_item_with_content}</h2>'
+
+                    # Match subsections like "(a)", "(b)", "(c)" etc.
+                    elif re.match(r'^[a-zA-Z]+', line):
+                        current_numbered_sub_item = line
+                        formatted_content += f'\n<h3>{current_numbered_sub_item} {line[1:].strip()}</h3>'
+
+                    # Match numbered items like "1.", "2.", "3." etc.
+                    elif re.match(r'^\d+\.', line):
+                        formatted_content += f'\n<h4>{line}</h4>'
+
+                    elif re.match(r'^\d+\s?', line):
+                        formatted_content += f'\n<h4>{line}</h4>'
+
+                    else:
+                        formatted_content += f'\n<p>{line}</p>'
+
+    # Merge <h2> tags with Roman numerals with the following <p> tag if they contain only Roman numerals
+    soup = BeautifulSoup(formatted_content, 'html.parser')
+    roman_pattern = re.compile(r'^\s*(M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3}))\s*\.?\s*$')
+
+    h2_tags = soup.find_all('h2')
+
+    for h2 in h2_tags:
+        # Check if <h2> contains only a Roman numeral using regex
+        if roman_pattern.match(h2.get_text()):
+            # Find the next <p> tag sibling
+            next_p = h2.find_next_sibling('p')
+            if next_p:
+                # Merge <p> tag content into <h2> and remove the <p> tag
+                h2.string = f"{h2.get_text().strip()} {next_p.get_text().strip()}"
+                next_p.decompose()
+
+    # Replace formatted_content with the modified soup
+    formatted_content = str(soup)
+
+    chapter_content += formatted_content
+    section_count += 1
+    chapter_content += "\n</div>\n</body>"
+
+    if section_count > 0:
+        title_number_match = re.search(r'TITLE (\w+): (.+)', title_name)
+        chapter_number_match = re.search(r'CHAPTER \d+(-?[A-Za-z]*)', safe_chapter_name)
+
+        if title_number_match and chapter_number_match:
+            title_number = title_number_match.group(1)
+            chapter_number = chapter_number_match.group(0).split(" ")[1]  # Get the chapter number
+
+            # Construct the filename using title_number and chapter_number
+            xml_filename = os.path.join(Collection_path, f'{title_number}_{chapter_number}.xml')
+
+            # Write chapter content to XML file
+            with open(xml_filename, 'w', encoding='utf-8') as f:
+                f.write(chapter_content)
+
+            logger.info(f"Saved {section_count} sections in {xml_filename}")
+            return xml_filename
+
+        else:
+            logger.error("Could not extract title or chapter number from the chapter name.")
+            return None
+
+    else:
+        logger.warning(f"No sections found for {chapter_name}. Skipping.")
+        return None
+
+
+
+
 async def fetch_title(title_name, title_url):
     """Fetch and process each title."""
     logger.info(f"Downloading title: {title_name} from {title_url}")
