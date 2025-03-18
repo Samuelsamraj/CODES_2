@@ -1,6 +1,102 @@
 
 
 
+
+import os
+import re
+import sys
+import logging
+import requests
+import asyncio
+from bs4 import BeautifulSoup
+from lxml import etree
+
+# Setup Logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Base URL
+BASE_URL = "https://webserver.rilegislature.gov/Statutes/"
+
+# XML Header
+CHAPTER_TEXT = """<?xml version="1.0"?>
+<body>
+<div class="WordSection1">
+"""
+
+# ---------------------------- #
+# Function 1: Fetch Webpage Content
+# ---------------------------- #
+async def get_content(url, Collection_path):
+    """Fetches and parses the webpage content."""
+    sess = requests.Session()
+    obj_Acts = sess.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=180)
+
+    try:
+        detail_html_Acts = obj_Acts.text
+    except Exception as r:
+        logger.info("Unable to get the website content %s. \n Website return info : %s", url, r)
+        sys.exit(0)
+
+    soup_Acts = BeautifulSoup(obj_Acts.content, 'html.parser')
+    return soup_Acts
+
+# ---------------------------- #
+# Function 2: Extract All Titles
+# ---------------------------- #
+async def get_title_dict(url, Collection_path):
+    """Fetches and extracts all titles from the main page."""
+    page_content = await get_content(url, Collection_path)
+
+    title_links = {}
+    for li in page_content.find_all("li"):
+        title_anchor = li.find("a")
+        if title_anchor and "href" in title_anchor.attrs:
+            title_name = title_anchor.text.strip()
+            title_url = BASE_URL + title_anchor["href"]  # Construct full URL
+            title_links[title_name] = title_url
+
+    return title_links  # Returns dictionary {Title Name: URL}
+
+# ---------------------------- #
+# Function 3: Extract Chapters and Sections for a Title
+# ---------------------------- #
+async def get_title(title_url, title, toc_list, Collection_path):
+    """Extracts all chapters and sections for a given title."""
+    
+    logger.info(f"Downloading Rhode Island Statutes for {title}")
+
+    article_data = {}
+    chapter_content = await get_content(title_url, Collection_path)
+
+    # Extracting chapters (Inside <p> tags with <a> links)
+    chapter_links = {}
+    for p in chapter_content.find_all("p"):
+        chapter_anchor = p.find("a")
+        if chapter_anchor and "href" in chapter_anchor.attrs:
+            chapter_name = chapter_anchor.text.strip()
+            chapter_url = title_url.rsplit("/", 1)[0] + "/" + chapter_anchor["href"]
+            chapter_links[chapter_name] = chapter_url
+
+    for chapter_name, chapter_url in chapter_links.items():
+        chapter_page = await get_content(chapter_url, Collection_path)
+
+        # Extract sections
+        section_links = {}
+        for sec_p in chapter_page.find_all("p"):
+            section_anchor = sec_p.find("a")
+            if section_anchor and "href" in section_anchor.attrs:
+                section_name = section_anchor.text.strip()
+                section_url = chapter_url.rsplit("/", 1)[0] + "/" + section_anchor["href"]
+                section_links[section_name] = section_url
+
+        article_data[chapter_name] = section_links
+
+    return article_data
+
+# ---------------------------- #
+# Function 4: Fetch and Extract Statute Content
+# ---------------------------- #
 def get_file(act_href):
     """Fetches content from a statute section page."""
     obj_Acts3 = requests.get(act_href, headers={'User-Agent': 'Mozilla/5.0'}, timeout=1180)
@@ -13,48 +109,59 @@ def get_file(act_href):
 
     soup_Acts3 = BeautifulSoup(obj_Acts3.content, 'html.parser')
 
-    # Extracting the legal content from the section page
-    content_div = soup_Acts3.find("div")  # Finding the main content container
-    if content_div:
-        download_content = content_div
+    # Extract main content from the section page
+    content_div = soup_Acts3.find("div")
 
+    if content_div:
         for table in soup_Acts3.find_all('table'):
             table.decompose()  # Remove tables if they exist
+        return str(content_div)
 
-        return str(download_content)
-    
     return None  # Return None if no content is found
 
-
-async def get_content(url, Collection_path):
-    """Fetches and parses the webpage content."""
-    sess = requests.Session()
-
-    obj_Acts = sess.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=180)
-
-    try:
-        detail_html_Acts = obj_Acts.text
-    except Exception as r:
-        logger.info("Unable to get the website content %s. \n Website return info : %s", url, r)
-        sys.exit(0)
-
-    soup_Acts = BeautifulSoup(obj_Acts.content, 'html.parser')
-
-    return soup_Acts
-
-
-async def get_title_dict(url, Collection_path):
-    """Fetches and extracts all titles from the main page."""
+# ---------------------------- #
+# Function 5: Run Full Scraper
+# ---------------------------- #
+async def scrape_statutes():
+    """Runs the full scraper to extract Titles, Chapters, and Sections."""
     
-    page_content = await get_content(url, Collection_path)
+    COLLECTION_PATH = "output_data"
+    os.makedirs(COLLECTION_PATH, exist_ok=True)
 
-    # Titles are inside <li> elements with <a> links
-    title_links = {}
-    for li in page_content.find_all("li"):
-        title_anchor = li.find("a")
-        if title_anchor and "href" in title_anchor.attrs:
-            title_name = title_anchor.text.strip()
-            title_url = url + title_anchor["href"]  # Construct full URL
-            title_links[title_name] = title_url
+    logger.info("Fetching All Titles...")
+    titles = await get_title_dict(BASE_URL, COLLECTION_PATH)
 
-    return title_links  # Returns dictionary {Title Name: URL}
+    if not titles:
+        logger.error("No titles found. Check HTML structure.")
+        return
+
+    logger.info(f"Found {len(titles)} Titles. Processing...")
+    
+    full_data = {}
+
+    for title_name, title_url in titles.items():
+        logger.info(f"Processing Title: {title_name}")
+        chapters = await get_title(title_url, title_name, titles, COLLECTION_PATH)
+        full_data[title_name] = chapters
+
+        for chapter_name, sections in chapters.items():
+            for section_name, section_url in sections.items():
+                logger.info(f"Fetching Section: {section_name} - {section_url}")
+                content = get_file(section_url)
+                if content:
+                    path = os.path.join(COLLECTION_PATH, f"{title_name}_{chapter_name}_{section_name}.xml")
+                    with open(path, "w", encoding="utf-8") as file:
+                        file.write(CHAPTER_TEXT + "\n")
+                        file.write(f"<h1>{title_name}</h1>\n")
+                        file.write(f"<h2>{chapter_name}</h2>\n")
+                        file.write(f"<h3>{section_name}</h3>\n")
+                        file.write(content)
+                        file.write("\n</div>\n</body>")
+
+    logger.info("Scraping Completed Successfully!")
+
+# ---------------------------- #
+# Running the Scraper
+# ---------------------------- #
+if __name__ == "__main__":
+    asyncio.run(scrape_statutes())
