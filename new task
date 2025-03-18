@@ -196,3 +196,82 @@ async def fetch_section(section_links, chapter_name, title_name, Collection_path
         section_data[section_name] = xml_filename
 
     return section_data
+
+
+async def fetch_section(section_links, chapter_name, title_name, Collection_path):
+    """Fetch section data and return formatted XML."""
+
+    section_data = {}
+
+    for section_name, section_url in section_links.items():
+        logger.info(f"Fetching section: {section_name} - {section_url}")
+
+        section_soup = await get_content(section_url)
+
+        if not section_soup:
+            logger.warning(f"Skipping {section_name}: Unable to fetch content.")
+            continue
+
+        # Extract title & chapter names from meta tags
+        meta_tag_title = section_soup.find('meta', {'name': 'title'})
+        meta_tag_chapter = section_soup.find('meta', {'name': 'chapter'})
+
+        safe_title_name = meta_tag_title['content'].strip().replace(":", ".") if meta_tag_title else title_name
+        safe_chapter_name = meta_tag_chapter['content'].strip().replace(":", "-").replace("/", "-") if meta_tag_chapter else chapter_name
+
+        chapter_content = CHAPTER_TEXT
+        dl_counter = 1
+
+        # Add title and chapter names
+        chapter_content += f'\n<p class="c1" dl="{dl_counter}">{safe_title_name}</p>'
+        dl_counter += 1
+        chapter_content += f'\n<p class="c1" dl="{dl_counter}">{safe_chapter_name}</p>'
+        dl_counter += 1
+
+        formatted_content = ""
+
+        # Extract content inside the <body> tag
+        body_tag = section_soup.find('body')
+        if not body_tag:
+            logger.warning(f"Skipping {section_name}: No <body> tag found.")
+            continue
+
+        # Extract all text inside <div>, <p>, <center>, <h1>, and <h3>
+        all_content = body_tag.find_all(['div', 'p', 'center', 'h1', 'h3'])
+
+        for content in all_content:
+            tag_name = content.name  # Get the tag name (div, p, center, h1, h3)
+            text = content.get_text("\n", strip=True)
+
+            # Convert bold text to <b> format
+            bold_text = content.find('b')
+            if bold_text:
+                text = f"<b>{bold_text.get_text(strip=True)}</b>"
+
+            # Preserve original structure
+            if tag_name == "h1":
+                formatted_content += f'\n<h1>{text}</h1>'
+            elif tag_name == "h3":
+                formatted_content += f'\n<h3>{text}</h3>'
+            elif tag_name == "center":
+                formatted_content += f'\n<center>{text}</center>'
+            elif tag_name == "p":
+                formatted_content += f'\n<p>{text}</p>'
+            elif tag_name == "div":
+                formatted_content += f'\n<div>{text}</div>'
+
+        chapter_content += formatted_content
+        chapter_content += "\n</div>\n</body>"
+
+        # Save XML file
+        os.makedirs(Collection_path, exist_ok=True)
+        xml_filename = os.path.join(Collection_path, f"{title_name}_{chapter_name}_{section_name}.xml")
+
+        with open(xml_filename, 'w', encoding='utf-8') as f:
+            f.write(chapter_content)
+
+        logger.info(f"Saved section in {xml_filename}")
+        section_data[section_name] = xml_filename
+
+    return section_data
+
