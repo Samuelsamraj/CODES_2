@@ -4,6 +4,91 @@
 
 import os
 import re
+import logging
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
+
+async def fetch_section(section_links, chapter_name, title_number, chapter_number, Collection_path):
+    """Fetch all sections within a chapter and store them in a single XML file."""
+
+    formatted_content = ""
+    section_count = 0
+
+    for section_name, section_url in section_links.items():
+        logger.info(f"Fetching section: {section_name} - {section_url}")
+
+        section_soup = await get_content(section_url)
+
+        if not section_soup:
+            logger.warning(f"Skipping {section_name}: Unable to fetch content.")
+            continue
+
+        # Extract content inside the <body> tag
+        body_tag = section_soup.find('body')
+        if not body_tag:
+            logger.warning(f"Skipping {section_name}: No <body> tag found.")
+            continue
+
+        # Add section title inside <h1> tag
+        formatted_content += f'\n<h1 class="c2">{section_name}</h1>'
+
+        # Extract all content inside <div>, <p>, <center>, <h1>, and <h3>
+        all_content = body_tag.find_all(['div', 'p', 'center', 'h1', 'h3'])
+
+        for content in all_content:
+            tag_name = content.name  # Get the tag name
+
+            # Extract text including <b> and normal text
+            bold_text = content.find('b')
+            normal_text = content.get_text(" ", strip=True)
+
+            # Ensure bold text remains inside <b> while keeping full paragraph
+            if bold_text:
+                formatted_text = f"<b>{bold_text.get_text(strip=True)}</b> {normal_text.replace(bold_text.get_text(strip=True), '').strip()}"
+            else:
+                formatted_text = normal_text  # If no <b> tag, keep full text
+
+            # Preserve original structure
+            if tag_name == "h1":
+                formatted_content += f'\n<h1>{formatted_text}</h1>'
+            elif tag_name == "h3":
+                formatted_content += f'\n<h3>{formatted_text}</h3>'
+            elif tag_name == "center":
+                formatted_content += f'\n<center>{formatted_text}</center>'
+            elif tag_name == "p":
+                formatted_content += f'\n<p>{formatted_text}</p>'
+            elif tag_name == "div":
+                formatted_content += f'\n<div>{formatted_text}</div>'
+
+        section_count += 1
+
+    # Skip if no sections were extracted
+    if section_count == 0:
+        logger.warning(f"No sections found for Chapter {chapter_number}. Skipping.")
+        return None
+
+    # Create title folder (Title_1, Title_2, etc.)
+    title_folder = os.path.join(Collection_path, f"Title_{title_number}")
+    os.makedirs(title_folder, exist_ok=True)
+
+    # Construct XML file path for the chapter
+    xml_filename = os.path.join(title_folder, f"{title_number}_{chapter_number}.xml")
+
+    # Write chapter content to a single XML file
+    with open(xml_filename, 'w', encoding='utf-8') as f:
+        f.write(f"<?xml version='1.0'?>\n<body>\n<div class='WordSection1'>")
+        f.write(formatted_content)
+        f.write("\n</div>\n</body>")
+
+    logger.info(f"Saved Chapter {chapter_number} with {section_count} sections in {xml_filename}")
+    return xml_filename
+
+
+
+
+import os
+import re
 import ssl
 import logging
 import aiohttp
