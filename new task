@@ -2,14 +2,7 @@
 
 
 
-import os
-import re
-import logging
-import aiohttp
-import asyncio
-from bs4 import BeautifulSoup
-
-async def fetch_section(section_links, chapter_name, title_number, chapter_number, Collection_path):
+async def fetch_section(section_links, chapter_name, title_name, Collection_path):
     """Fetch all sections within a chapter and store them in a single XML file."""
 
     formatted_content = ""
@@ -29,6 +22,18 @@ async def fetch_section(section_links, chapter_name, title_number, chapter_numbe
         if not body_tag:
             logger.warning(f"Skipping {section_name}: No <body> tag found.")
             continue
+
+        # Extract Title & Chapter Numbers from Headings
+        title_heading = body_tag.find('h1')  # Extract <h1> containing the Title
+        chapter_heading = body_tag.find('h2')  # Extract <h2> containing the Chapter
+
+        if title_heading:
+            title_number_match = re.search(r'TITLE (\d+)', title_heading.get_text(strip=True))
+            title_number = title_number_match.group(1) if title_number_match else "Unknown"
+
+        if chapter_heading:
+            chapter_number_match = re.search(r'CHAPTER (\d+)', chapter_heading.get_text(strip=True))
+            chapter_number = chapter_number_match.group(1) if chapter_number_match else "Unknown"
 
         # Add section title inside <h1> tag
         formatted_content += f'\n<h1 class="c2">{section_name}</h1>'
@@ -83,6 +88,7 @@ async def fetch_section(section_links, chapter_name, title_number, chapter_numbe
 
     logger.info(f"Saved Chapter {chapter_number} with {section_count} sections in {xml_filename}")
     return xml_filename
+
 
 
 
