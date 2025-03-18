@@ -1,0 +1,60 @@
+
+
+
+def get_file(act_href):
+    """Fetches content from a statute section page."""
+    obj_Acts3 = requests.get(act_href, headers={'User-Agent': 'Mozilla/5.0'}, timeout=1180)
+
+    try:
+        detail_html_Acts = obj_Acts3.text
+    except Exception as r:
+        logger.info("Unable to get the website content %s. \n Website return info : %s", act_href, r)
+        sys.exit(0)
+
+    soup_Acts3 = BeautifulSoup(obj_Acts3.content, 'html.parser')
+
+    # Extracting the legal content from the section page
+    content_div = soup_Acts3.find("div")  # Finding the main content container
+    if content_div:
+        download_content = content_div
+
+        for table in soup_Acts3.find_all('table'):
+            table.decompose()  # Remove tables if they exist
+
+        return str(download_content)
+    
+    return None  # Return None if no content is found
+
+
+async def get_content(url, Collection_path):
+    """Fetches and parses the webpage content."""
+    sess = requests.Session()
+
+    obj_Acts = sess.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=180)
+
+    try:
+        detail_html_Acts = obj_Acts.text
+    except Exception as r:
+        logger.info("Unable to get the website content %s. \n Website return info : %s", url, r)
+        sys.exit(0)
+
+    soup_Acts = BeautifulSoup(obj_Acts.content, 'html.parser')
+
+    return soup_Acts
+
+
+async def get_title_dict(url, Collection_path):
+    """Fetches and extracts all titles from the main page."""
+    
+    page_content = await get_content(url, Collection_path)
+
+    # Titles are inside <li> elements with <a> links
+    title_links = {}
+    for li in page_content.find_all("li"):
+        title_anchor = li.find("a")
+        if title_anchor and "href" in title_anchor.attrs:
+            title_name = title_anchor.text.strip()
+            title_url = url + title_anchor["href"]  # Construct full URL
+            title_links[title_name] = title_url
+
+    return title_links  # Returns dictionary {Title Name: URL}
